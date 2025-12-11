@@ -60,7 +60,7 @@ shared_scaler = joblib.load(r"D:\project\Minarah\backend\app\ml_models\scaler.pk
 
 # Create numeric transformer using the shared scaler
 numeric_transformer = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='median')),
+    ('imputer', SimpleImputer(strategy='mean')),
     ('scaler', shared_scaler)
 ])
 
