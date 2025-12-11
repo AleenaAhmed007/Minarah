@@ -30,3 +30,7 @@ def available_teams():
 @router.put("/status/{team_id}")
 def change_status(team_id: str, status: str):
     return rescue_team_service.update_status(team_id, status)
+
+@router.get("/allTeams")
+def get_all_teams():
+    return rescue_team_service.get_all_teams()

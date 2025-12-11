@@ -45,6 +45,12 @@ class RescueTeamService:
         for t in teams:
             t["_id"] = str(t["_id"])
         return teams
+    
+    def get_all_teams(self):
+        teams = list(self.collection.find())
+        for t in teams:
+            t["_id"] = str(t["_id"])
+        return teams
 
     def update_status(self, team_id, status):
         self.collection.update_one(

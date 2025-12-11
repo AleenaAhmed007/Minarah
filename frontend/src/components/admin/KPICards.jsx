@@ -1,6 +1,7 @@
 // src/components/admin/KPICards.jsx
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import apiService from "../../services/apiService";
 
 const KPICard = ({ title, value, subtitle, gradient, textColor }) => (
   <div
@@ -8,13 +9,58 @@ const KPICard = ({ title, value, subtitle, gradient, textColor }) => (
   >
     <div className={`${textColor} text-sm font-medium mb-1`}>{title}</div>
     <div className="text-3xl font-bold text-white">{value}</div>
-    <div className={`${textColor.replace("400", "300/60")} text-xs mt-1`}>
-      {subtitle}
-    </div>
+    <div className="text-xs mt-1 opacity-70">{subtitle}</div>
   </div>
 );
 
-const KPICards = ({ sosKpis, teamKpis }) => {
+const KPICards = () => {
+  const [sosKpis, setSosKpis] = useState({
+    total: 0,
+    pending: 0,
+    assigned: 0,
+    rescued: 0,
+  });
+
+  const [teamKpis, setTeamKpis] = useState({
+    total: 0,
+    available: 0,
+    busy: 0,
+  });
+
+  // Fetch SOS + TEAM KPI data
+  useEffect(() => {
+    const loadKpis = async () => {
+      try {
+        // ========= SOS DATA =========
+        const sosRes = await apiService.getallSOS();
+        const sos = sosRes.data;
+
+        setSosKpis({
+          total: sos.length,
+          pending: sos.filter((x) => x.status === "Pending").length,
+          assigned: sos.filter((x) => x.status === "Assigned").length,
+          rescued: sos.filter((x) => x.status === "Rescued").length,
+        });
+
+        // ========= TEAM DATA =========
+        const teamRes = await apiService.getAllTeams();
+        const teams = teamRes.data;
+
+        setTeamKpis({
+          total: teams.length,
+          available: teams.filter((x) => x.availability === "Available").length,
+          busy: teams.filter((x) => x.availability === "Busy").length,
+          offline: teams.filter((x) => x.availability === "offline").length,
+        });
+
+      } catch (err) {
+        console.error("KPI loading failed:", err);
+      }
+    };
+
+    loadKpis();
+  }, []);
+
   const cards = [
     {
       title: "Total SOS",
@@ -65,6 +111,15 @@ const KPICards = ({ sosKpis, teamKpis }) => {
       gradient: "bg-gradient-to-br from-purple-500/20 to-purple-600/10 border border-purple-500/30",
       textColor: "text-purple-400",
     },
+    {
+      title: "Offline",
+      value: teamKpis.offline,
+      subtitle: "On mission",
+      gradient: "bg-gradient-to-br from-blue-500/20 to-blue-600/10 border border-purple-500/30",
+      textColor: "text-purple-400",
+    },
+
+
   ];
 
   return (
@@ -72,13 +127,14 @@ const KPICards = ({ sosKpis, teamKpis }) => {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay: 0.1 }}
-      className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4"
+      className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4"
     >
       {cards.map((card, idx) => (
         <KPICard key={idx} {...card} />
       ))}
     </motion.div>
   );
+
 };
 
 export default KPICards;

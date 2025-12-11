@@ -48,22 +48,7 @@ const SOSManagementTab = ({
 
       {/* SOS List */}
       <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 p-6 rounded-xl shadow-2xl">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-slate-100">
-            All SOS Requests ({sosList.length})
-          </h3>
-          <div className="flex gap-2">
-            <span className="px-2 py-1 rounded text-xs bg-orange-500/20 text-orange-300 border border-orange-500/30">
-              {sosKpis.pending} Pending
-            </span>
-            <span className="px-2 py-1 rounded text-xs bg-blue-500/20 text-blue-300 border border-blue-500/30">
-              {sosKpis.assigned} Assigned
-            </span>
-            <span className="px-2 py-1 rounded text-xs bg-green-500/20 text-green-300 border border-green-500/30">
-              {sosKpis.rescued} Rescued
-            </span>
-          </div>
-        </div>
+        
 
         {loading ? (
           <div className="text-slate-400 text-center py-12">

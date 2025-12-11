@@ -27,6 +27,7 @@ export default {
   // Add to your apiService.js
   getAvailableRescueTeams: () => api.get('/rescue/rescue/available'),
   updateRescueTeamStatus: (teamId, status) => api.put(`/rescue/rescue/status/${teamId}?status=${status}`),
+  getAllTeams: () => api.get(`/rescue/rescue/allTeams`),
 
   // ==== FLOOD ====
   // Your backend expects POST with JSON input, NOT GET
@@ -43,6 +44,7 @@ assignSocToRescue: (sosId, teamEmail) => {
   AssignedSOS: (rescue_email) => api.get(`/sos/sos/assigned/${rescue_email}`),
   markRescue: (sosId) => api.put(`/sos/sos/rescued/${sosId}`),
   RescuedSOS: (rescue_email) => api.get(`/sos/sos/rescuedSOS?rescue_email=${encodeURIComponent(rescue_email)}`),
+  getallSOS: () => api.get("/sos/sos/sos"),
 
   // ==== MAPS ====
   fetchPakistanGeo: () => api.get("/geo/pakistan"),
