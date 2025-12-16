@@ -44,6 +44,100 @@ const userIcon = new L.Icon({
   popupAnchor: [0, -15],
 });
 
+// ========== LRU CACHE IMPLEMENTATION ==========
+class LRUCache {
+  constructor(capacity) {
+    this.capacity = capacity;
+    this.cache = new Map();
+  }
+
+  get(key) {
+    if (!this.cache.has(key)) return null;
+    
+    // Move to end (most recently used)
+    const value = this.cache.get(key);
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    
+    return value;
+  }
+
+  set(key, value) {
+    // Delete if exists (to update position)
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    }
+    
+    // Add to end
+    this.cache.set(key, value);
+    
+    // Remove oldest if over capacity
+    if (this.cache.size > this.capacity) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+  }
+
+  has(key) {
+    return this.cache.has(key);
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+
+  size() {
+    return this.cache.size;
+  }
+}
+
+// ========== HASH MAP FOR HOSPITAL DATA ==========
+class HospitalHashMap {
+  constructor() {
+    this.map = new Map();
+  }
+
+  // Generate key based on location and radius
+  generateKey(lat, lon, radius) {
+    // Round to 3 decimal places to group nearby locations
+    const roundedLat = Math.round(lat * 1000) / 1000;
+    const roundedLon = Math.round(lon * 1000) / 1000;
+    return `${roundedLat},${roundedLon},${radius}`;
+  }
+
+  set(lat, lon, radius, hospitals) {
+    const key = this.generateKey(lat, lon, radius);
+    this.map.set(key, {
+      hospitals,
+      timestamp: Date.now(),
+    });
+  }
+
+  get(lat, lon, radius) {
+    const key = this.generateKey(lat, lon, radius);
+    const data = this.map.get(key);
+    
+    if (!data) return null;
+    
+    // Cache expires after 1 hour
+    const ONE_HOUR = 60 * 60 * 1000;
+    if (Date.now() - data.timestamp > ONE_HOUR) {
+      this.map.delete(key);
+      return null;
+    }
+    
+    return data.hospitals;
+  }
+
+  clear() {
+    this.map.clear();
+  }
+}
+
+// ========== GLOBAL CACHE INSTANCES ==========
+const hospitalCache = new HospitalHashMap();
+const routeCache = new LRUCache(50); // Store up to 50 routes
+
 // ========== CONSTANTS ==========
 const PROVINCE_THRESHOLDS = {
   punjab: { precipHigh: 100, tempHigh: 35, ndviLow: 0.25, ndsiSnow: 0.3 },
@@ -138,8 +232,17 @@ const getUserLocation = () => {
   });
 };
 
-// 2. Find Nearest Hospital (Overpass API)
+// 2. Find Nearest Hospital (Overpass API) - WITH HASH MAP CACHING
 const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
+  // Check cache first
+  const cachedHospitals = hospitalCache.get(lat, lon, radius);
+  if (cachedHospitals) {
+    console.log("🎯 Using cached hospital data");
+    return cachedHospitals;
+  }
+
+  console.log("🔍 Fetching hospitals from Overpass API...");
+  
   const query = `
     [out:json];
     node["amenity"="hospital"](around:${radius},${lat},${lon});
@@ -151,12 +254,18 @@ const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
       body: query,
     });
     const data = await response.json();
-    return data.elements.map((item) => ({
+    const hospitals = data.elements.map((item) => ({
       id: item.id,
       name: item.tags.name || "Medical Center",
       lat: item.lat,
       lon: item.lon,
     }));
+
+    // Store in cache
+    hospitalCache.set(lat, lon, radius, hospitals);
+    console.log(`✅ Cached ${hospitals.length} hospitals`);
+
+    return hospitals;
   } catch (e) {
     console.error("Overpass API Error:", e);
     return [];
@@ -215,12 +324,27 @@ const sampleRoutePoints = (routeCoords, numSamples = 5) => {
   return samples;
 };
 
-// 6. Get Optimized Route with Flood Checking (OpenRouteService)
+// 6. Get Optimized Route with Flood Checking (OpenRouteService) - WITH LRU CACHE
 const getOptimizedRoute = async (start, end, province, setFloodWarnings) => {
   if (!ORS_API_KEY) {
     console.error("Missing ORS API Key");
     return null;
   }
+
+  // Generate cache key
+  const cacheKey = `${start.lat.toFixed(4)},${start.lon.toFixed(4)}-${end.lat.toFixed(4)},${end.lon.toFixed(4)}-${province}`;
+  
+  // Check LRU cache
+  const cachedRoute = routeCache.get(cacheKey);
+  if (cachedRoute) {
+    console.log("🎯 Using cached route data");
+    if (setFloodWarnings && cachedRoute.floodWarnings) {
+      setFloodWarnings(cachedRoute.floodWarnings);
+    }
+    return cachedRoute.routePath;
+  }
+
+  console.log("🔍 Fetching route from OpenRouteService...");
 
   try {
     const res = await fetch(
@@ -253,6 +377,14 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings) => {
       if (setFloodWarnings && floodChecks.length > 0) {
         setFloodWarnings(floodChecks);
       }
+
+      // Store in LRU cache
+      routeCache.set(cacheKey, {
+        routePath,
+        floodWarnings: floodChecks,
+        timestamp: Date.now(),
+      });
+      console.log("✅ Route cached in LRU");
 
       return routePath;
     }
@@ -341,6 +473,9 @@ function CitizenDashboard() {
   const [floodWarnings, setFloodWarnings] = useState([]);
   const [alternateHospitals, setAlternateHospitals] = useState([]);
 
+  // Cache Statistics
+  const [cacheStats, setCacheStats] = useState({ hospitals: 0, routes: 0 });
+
   const { logout } = useAuth();
   const navigate = useNavigate();
 
@@ -349,6 +484,19 @@ function CitizenDashboard() {
     area: "Lahore",
     province: "Punjab",
   };
+
+  // Update cache stats
+  useEffect(() => {
+    const updateStats = () => {
+      setCacheStats({
+        hospitals: hospitalCache.map.size,
+        routes: routeCache.size(),
+      });
+    };
+    updateStats();
+    const interval = setInterval(updateStats, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // ========================= WebSocket Handling =========================
   useEffect(() => {
@@ -586,6 +734,10 @@ function CitizenDashboard() {
               <span>Last updated: {lastUpdated.toLocaleString()}</span>
             </div>
           )}
+          {/* Cache Stats */}
+          <div className="flex items-center gap-4 text-xs text-gray-500 mt-2">
+            <span>🗄️ Cache: {cacheStats.hospitals} hospitals | {cacheStats.routes} routes</span>
+          </div>
         </div>
 
         <div className="flex gap-2">
