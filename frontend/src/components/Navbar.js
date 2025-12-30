@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 export const colors = {
@@ -22,6 +22,7 @@ function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [resourcesDropdownOpen, setResourcesDropdownOpen] = useState(false);
   const [user, setUser] = useState(null);
+  const dropdownTimeoutRef = useRef(null);
 
   useEffect(() => {
     const storedUser = localStorage.getItem("user");
@@ -44,20 +45,19 @@ function Navbar() {
   const toggleMobileMenu = () => setMobileMenuOpen(!mobileMenuOpen);
 
   const getDashboardRoute = () => {
-  if (!user) return "/dashboard";
+    if (!user) return "/dashboard";
 
-  // Admin flag from backend
-  if (user.isAdmin) return "/admin";
+    // Admin flag from backend
+    if (user.isAdmin) return "/admin";
 
-  // Role-based routing
-  const role = (user.role || "").toLowerCase();
+    // Role-based routing
+    const role = (user.role || "").toLowerCase();
 
-  if (role === "citizen") return "/citizen";
-  if (role === "rescue") return "/rescue";
+    if (role === "citizen") return "/citizen";
+    if (role === "rescue") return "/rescue";
 
-  return "/dashboard";
-};
-
+    return "/dashboard";
+  };
 
   const getDashboardIcon = () => {
     if (!user || !user.role) return "📊";
@@ -73,6 +73,29 @@ function Navbar() {
     { to: "/FloodCauses", label: "Causes", icon: "🔍" },
     { to: "/FloodPrevention", label: "Prevention & Safety", icon: "🛡️" },
   ];
+
+  // Handle dropdown with delay
+  const handleDropdownEnter = () => {
+    if (dropdownTimeoutRef.current) {
+      clearTimeout(dropdownTimeoutRef.current);
+    }
+    setResourcesDropdownOpen(true);
+  };
+
+  const handleDropdownLeave = () => {
+    dropdownTimeoutRef.current = setTimeout(() => {
+      setResourcesDropdownOpen(false);
+    }, 200); // 200ms delay before closing
+  };
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (dropdownTimeoutRef.current) {
+        clearTimeout(dropdownTimeoutRef.current);
+      }
+    };
+  }, []);
 
   return (
     <nav className="w-full px-6 py-4 bg-slate-900/95 backdrop-blur-lg border-b border-slate-700 shadow-lg sticky top-0 z-50">
@@ -105,25 +128,36 @@ function Navbar() {
                 About Us
               </Link>
 
-              {/* Resources */}
+              {/* Resources Dropdown */}
               <div 
                 className="relative"
-                onMouseEnter={() => setResourcesDropdownOpen(true)}
-                onMouseLeave={() => setResourcesDropdownOpen(false)}
+                onMouseEnter={handleDropdownEnter}
+                onMouseLeave={handleDropdownLeave}
               >
                 <button
                   className="text-slate-300 hover:text-cyan-400 transition-colors duration-200 font-medium flex items-center gap-1"
                 >
                   Resources
-                  <svg className={`w-4 h-4 transition-transform ${resourcesDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg 
+                    className={`w-4 h-4 transition-transform duration-200 ${resourcesDropdownOpen ? 'rotate-180' : ''}`} 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
 
                 {resourcesDropdownOpen && (
-                  <div className="absolute top-full left-0 mt-2 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-2">
+                  <div 
+                    className="absolute top-full left-0 mt-2 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-2 animate-in fade-in slide-in-from-top-2 duration-200"
+                    onMouseEnter={handleDropdownEnter}
+                    onMouseLeave={handleDropdownLeave}
+                  >
                     {resourceLinks.map(link => (
-                      <Link key={link.to} to={link.to}
+                      <Link 
+                        key={link.to} 
+                        to={link.to}
                         className="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:text-cyan-400 hover:bg-slate-700 transition-all duration-200"
                       >
                         <span className="text-xl">{link.icon}</span>
@@ -161,25 +195,36 @@ function Navbar() {
                 About Us
               </Link>
 
-              {/* Resources */}
+              {/* Resources Dropdown */}
               <div 
                 className="relative"
-                onMouseEnter={() => setResourcesDropdownOpen(true)}
-                onMouseLeave={() => setResourcesDropdownOpen(false)}
+                onMouseEnter={handleDropdownEnter}
+                onMouseLeave={handleDropdownLeave}
               >
                 <button
                   className="text-slate-300 hover:text-cyan-400 transition-colors duration-200 font-medium flex items-center gap-1"
                 >
                   Resources
-                  <svg className={`w-4 h-4 transition-transform ${resourcesDropdownOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg 
+                    className={`w-4 h-4 transition-transform duration-200 ${resourcesDropdownOpen ? 'rotate-180' : ''}`} 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
 
                 {resourcesDropdownOpen && (
-                  <div className="absolute top-full left-0 mt-2 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-2">
+                  <div 
+                    className="absolute top-full left-0 mt-2 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-2 animate-in fade-in slide-in-from-top-2 duration-200"
+                    onMouseEnter={handleDropdownEnter}
+                    onMouseLeave={handleDropdownLeave}
+                  >
                     {resourceLinks.map(link => (
-                      <Link key={link.to} to={link.to}
+                      <Link 
+                        key={link.to} 
+                        to={link.to}
                         className="flex items-center gap-3 px-4 py-2.5 text-slate-300 hover:text-cyan-400 hover:bg-slate-700 transition-all duration-200"
                       >
                         <span className="text-xl">{link.icon}</span>
@@ -221,9 +266,9 @@ function Navbar() {
 
         {/* Mobile Menu Toggle */}
         <button onClick={toggleMobileMenu} className="md:hidden flex flex-col gap-1.5 p-2 hover:bg-slate-800 rounded-lg transition-colors">
-          <span className={`w-6 h-0.5 bg-slate-300 ${mobileMenuOpen ? "rotate-45 translate-y-2" : ""}`} />
-          <span className={`w-6 h-0.5 bg-slate-300 ${mobileMenuOpen ? "opacity-0" : ""}`} />
-          <span className={`w-6 h-0.5 bg-slate-300 ${mobileMenuOpen ? "-rotate-45 -translate-y-2" : ""}`} />
+          <span className={`w-6 h-0.5 bg-slate-300 transition-all duration-300 ${mobileMenuOpen ? "rotate-45 translate-y-2" : ""}`} />
+          <span className={`w-6 h-0.5 bg-slate-300 transition-all duration-300 ${mobileMenuOpen ? "opacity-0" : ""}`} />
+          <span className={`w-6 h-0.5 bg-slate-300 transition-all duration-300 ${mobileMenuOpen ? "-rotate-45 -translate-y-2" : ""}`} />
         </button>
       </div>
     </nav>

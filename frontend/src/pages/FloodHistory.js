@@ -11,7 +11,7 @@ function FloodHistory() {
       damage: "$30+ billion economic losses"
     },
     {
-      year: "2010",
+      year: "2025",
       title: "Super Flood",
       impact: "20 million affected, 2,000+ deaths",
       details: "Record-breaking monsoon rains caused widespread devastation across all provinces. The Indus River breached its banks in multiple locations.",
@@ -48,7 +48,7 @@ function FloodHistory() {
   ];
 
   const statistics = [
-    { label: "Total Affected (2010-2022)", value: "65M+", icon: "👥" },
+    { label: "Total Affected (2010-2025)", value: "65M+", icon: "👥" },
     { label: "Economic Losses", value: "$50B+", icon: "💰" },
     { label: "Major Flood Events", value: "15+", icon: "🌊" },
     { label: "Provinces Affected", value: "All 4", icon: "🗺️" }
