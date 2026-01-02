@@ -16,39 +16,12 @@ import {
   Info,
   Droplets,
   Navigation,
+  LogOut,
 } from "lucide-react";
-
-// ========== MOCK API SERVICE ==========
-const apiService = {
-  getFloodPrediction: async (payload) => {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    return {
-      data: {
-        flood: payload.rain_mm > 80,
-        severity: payload.rain_mm > 100 ? "severe" : payload.rain_mm > 80 ? "moderate" : "low",
-        confidence: 0.85,
-        explanation: [
-          `Precipitation: ${payload.rain_mm.toFixed(1)} mm`,
-          `Temperature: ${payload.temp.toFixed(1)}°C`,
-          `Vegetation index: ${payload.veg.toFixed(3)}`,
-        ]
-      }
-    };
-  }
-};
-
-// ========== ICONS CONFIG ==========
-const hospitalIcon = new L.Icon({
-  iconUrl: "https://cdn-icons-png.flaticon.com/512/4320/4320350.png",
-  iconSize: [35, 35],
-  popupAnchor: [0, -15],
-});
-
-const userIcon = new L.Icon({
-  iconUrl: "https://cdn-icons-png.flaticon.com/512/9131/9131546.png",
-  iconSize: [35, 35],
-  popupAnchor: [0, -15],
-});
+import apiService from "../services/apiService";
+import SOSRequestModal from "../components/SOSRequestModal";
+import { useAuth } from "../auth/AuthProvider";
+import { useNavigate } from "react-router-dom";
 
 // ========== DUMMY DATA FOR TESTING ==========
 const DUMMY_FLOOD_DATA = {
@@ -81,6 +54,334 @@ const DUMMY_FLOOD_DATA = {
   ]
 };
 
+// ========== PRIORITY QUEUE FOR A* ALGORITHM ==========
+class PriorityQueue {
+  constructor() {
+    this.items = [];
+  }
+
+  enqueue(element, priority) {
+    const queueElement = { element, priority };
+    let added = false;
+
+    for (let i = 0; i < this.items.length; i++) {
+      if (queueElement.priority < this.items[i].priority) {
+        this.items.splice(i, 0, queueElement);
+        added = true;
+        break;
+      }
+    }
+
+    if (!added) {
+      this.items.push(queueElement);
+    }
+  }
+
+  dequeue() {
+    return this.items.shift();
+  }
+
+  isEmpty() {
+    return this.items.length === 0;
+  }
+
+  size() {
+    return this.items.length;
+  }
+}
+
+// ========== GRAPH DATA STRUCTURE (ADJACENCY LIST) ==========
+class RoadNetworkGraph {
+  constructor() {
+    this.adjacencyList = new Map();
+    this.nodes = new Map();
+  }
+
+  addNode(id, lat, lon, type = 'intersection') {
+    if (!this.nodes.has(id)) {
+      console.log(`%c📍 ADJACENCY LIST - ADD NODE`, 'color: #10b981; font-weight: bold');
+      console.log(`   Node ID: ${id}`);
+      console.log(`   Type: ${type}`);
+      console.log(`   Location: [${lat.toFixed(4)}, ${lon.toFixed(4)}]`);
+      this.nodes.set(id, { id, lat, lon, type });
+      this.adjacencyList.set(id, []);
+    }
+  }
+
+  addEdge(from, to, distance, floodRisk = 0) {
+    if (!this.adjacencyList.has(from)) {
+      this.addNode(from, 0, 0);
+    }
+    if (!this.adjacencyList.has(to)) {
+      this.addNode(to, 0, 0);
+    }
+
+    console.log(`%c🔗 ADJACENCY LIST - ADD EDGE`, 'color: #3b82f6; font-weight: bold');
+    console.log(`   From: ${from} → To: ${to}`);
+    console.log(`   Distance: ${distance.toFixed(2)} km`);
+    console.log(`   Flood Risk: ${(floodRisk * 100).toFixed(0)}%`);
+    console.log(`   Weight: ${(distance * (1 + floodRisk * 10)).toFixed(2)}`);
+
+    // Bidirectional edge
+    this.adjacencyList.get(from).push({
+      neighbor: to,
+      distance,
+      floodRisk,
+      weight: distance * (1 + floodRisk * 10)
+    });
+
+    this.adjacencyList.get(to).push({
+      neighbor: from,
+      distance,
+      floodRisk,
+      weight: distance * (1 + floodRisk * 10)
+    });
+  }
+
+  updateFloodRisk(from, to, newFloodRisk) {
+    const updateEdge = (source, target) => {
+      const edges = this.adjacencyList.get(source);
+      if (edges) {
+        const edge = edges.find(e => e.neighbor === target);
+        if (edge) {
+          edge.floodRisk = newFloodRisk;
+          edge.weight = edge.distance * (1 + newFloodRisk * 10);
+        }
+      }
+    };
+
+    updateEdge(from, to);
+    updateEdge(to, from);
+  }
+
+  getNeighbors(nodeId) {
+    return this.adjacencyList.get(nodeId) || [];
+  }
+
+  getNode(nodeId) {
+    return this.nodes.get(nodeId);
+  }
+
+  getNodesByType(type) {
+    return Array.from(this.nodes.values()).filter(node => node.type === type);
+  }
+
+  // ========== HEURISTIC FUNCTION (Haversine Distance) ==========
+  calculateHeuristic(nodeId, goalId) {
+    const node = this.getNode(nodeId);
+    const goal = this.getNode(goalId);
+    
+    if (!node || !goal) return 0;
+
+    // Haversine formula for great-circle distance
+    const R = 6371; // Earth's radius in km
+    const dLat = ((goal.lat - node.lat) * Math.PI) / 180;
+    const dLon = ((goal.lon - node.lon) * Math.PI) / 180;
+    
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((node.lat * Math.PI) / 180) *
+      Math.cos((goal.lat * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+    
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  // ========== A* ALGORITHM IMPLEMENTATION ==========
+  findShortestPathAStar(startId, endId, preferSafety = true) {
+    console.log(`%c🎯 A* ALGORITHM - PATHFINDING START`, 'color: #f59e0b; font-weight: bold; font-size: 14px');
+    console.log(`   Start Node: ${startId}`);
+    console.log(`   End Node: ${endId}`);
+    console.log(`   Prefer Safety: ${preferSafety ? 'YES' : 'NO'}`);
+    
+    const openSet = new PriorityQueue();
+    const closedSet = new Set();
+    
+    // Track actual cost from start (g-score)
+    const gScore = new Map();
+    // Track estimated total cost (f-score = g + h)
+    const fScore = new Map();
+    // Track path
+    const cameFrom = new Map();
+    
+    // Initialize
+    for (const nodeId of this.nodes.keys()) {
+      gScore.set(nodeId, Infinity);
+      fScore.set(nodeId, Infinity);
+    }
+    
+    gScore.set(startId, 0);
+    fScore.set(startId, this.calculateHeuristic(startId, endId));
+    
+    openSet.enqueue(startId, fScore.get(startId));
+    
+    let nodesExplored = 0;
+    
+    while (!openSet.isEmpty()) {
+      const current = openSet.dequeue().element;
+      nodesExplored++;
+      
+      // Goal reached!
+      if (current === endId) {
+        console.log(`%c✅ A* ALGORITHM - SUCCESS!`, 'color: #10b981; font-weight: bold; font-size: 14px');
+        console.log(`   Nodes Explored: ${nodesExplored}`);
+        console.log(`   Path Found: YES`);
+        return this.reconstructPath(cameFrom, current, gScore);
+      }
+      
+      closedSet.add(current);
+      
+      // Explore neighbors
+      const neighbors = this.getNeighbors(current);
+      
+      for (const edge of neighbors) {
+        const neighbor = edge.neighbor;
+        
+        if (closedSet.has(neighbor)) continue;
+        
+        // Calculate tentative g-score
+        const weight = preferSafety ? edge.weight : edge.distance;
+        const tentativeGScore = gScore.get(current) + weight;
+        
+        if (tentativeGScore < gScore.get(neighbor)) {
+          // This path is better!
+          cameFrom.set(neighbor, current);
+          gScore.set(neighbor, tentativeGScore);
+          
+          // f(n) = g(n) + h(n)
+          const heuristic = this.calculateHeuristic(neighbor, endId);
+          fScore.set(neighbor, tentativeGScore + heuristic);
+          
+          // Add to open set if not already there
+          openSet.enqueue(neighbor, fScore.get(neighbor));
+        }
+      }
+    }
+    
+    console.log(`%c❌ A* ALGORITHM - NO PATH FOUND`, 'color: #ef4444; font-weight: bold; font-size: 14px');
+    console.log(`   Nodes Explored: ${nodesExplored}`);
+    return null;
+  }
+
+
+
+  // ========== RECONSTRUCT PATH ==========
+  reconstructPath(cameFrom, current, scores) {
+    const path = [];
+    
+    while (current !== undefined && current !== null) {
+      path.unshift(current);
+      current = cameFrom.get(current);
+    }
+
+    if (path.length === 0) return null;
+
+    return {
+      path,
+      distance: scores.get(path[path.length - 1]),
+      nodes: path.map(id => this.getNode(id))
+    };
+  }
+
+  // ========== PATH ANALYSIS ==========
+  getPathFloodRisk(path) {
+    let totalRisk = 0;
+    let count = 0;
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const edges = this.getNeighbors(path[i]);
+      const edge = edges.find(e => e.neighbor === path[i + 1]);
+      if (edge) {
+        totalRisk += edge.floodRisk;
+        count++;
+      }
+    }
+
+    return count > 0 ? totalRisk / count : 0;
+  }
+
+  getPathDetails(path) {
+    let totalDistance = 0;
+    let totalRisk = 0;
+    let highRiskSegments = 0;
+    const segments = [];
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const edges = this.getNeighbors(path[i]);
+      const edge = edges.find(e => e.neighbor === path[i + 1]);
+      
+      if (edge) {
+        totalDistance += edge.distance;
+        totalRisk += edge.floodRisk;
+        if (edge.floodRisk > 0.5) highRiskSegments++;
+        
+        segments.push({
+          from: path[i],
+          to: path[i + 1],
+          distance: edge.distance,
+          floodRisk: edge.floodRisk,
+          weight: edge.weight
+        });
+      }
+    }
+
+    return {
+      totalDistance,
+      averageRisk: path.length > 1 ? totalRisk / (path.length - 1) : 0,
+      highRiskSegments,
+      segments,
+      waypoints: path.length
+    };
+  }
+
+  clear() {
+    this.adjacencyList.clear();
+    this.nodes.clear();
+  }
+
+  getStats() {
+    let totalEdges = 0;
+    let highRiskEdges = 0;
+
+    for (const edges of this.adjacencyList.values()) {
+      totalEdges += edges.length;
+      highRiskEdges += edges.filter(e => e.floodRisk > 0.5).length;
+    }
+
+    return {
+      nodes: this.nodes.size,
+      edges: totalEdges / 2,
+      highRiskEdges: highRiskEdges / 2,
+      intersections: this.getNodesByType('intersection').length,
+      hospitals: this.getNodesByType('hospital').length,
+      shelters: this.getNodesByType('shelter').length,
+    };
+  }
+}
+
+// ========== GLOBAL GRAPH INSTANCE ==========
+const roadNetwork = new RoadNetworkGraph();
+
+// ========== ICONS CONFIG ==========
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: require("leaflet/dist/images/marker-icon-2x.png"),
+  iconUrl: require("leaflet/dist/images/marker-icon.png"),
+  shadowUrl: require("leaflet/dist/images/marker-shadow.png"),
+});
+
+const hospitalIcon = new L.Icon({
+  iconUrl: "https://cdn-icons-png.flaticon.com/512/4320/4320350.png",
+  iconSize: [35, 35],
+  popupAnchor: [0, -15],
+});
+
+const userIcon = new L.Icon({
+  iconUrl: "https://cdn-icons-png.flaticon.com/512/9131/9131546.png",
+  iconSize: [35, 35],
+  popupAnchor: [0, -15],
+});
+
 // ========== LRU CACHE IMPLEMENTATION ==========
 class LRUCache {
   constructor(capacity) {
@@ -89,22 +390,45 @@ class LRUCache {
   }
 
   get(key) {
-    if (!this.cache.has(key)) return null;
+    if (!this.cache.has(key)) {
+      console.log(`%c💾 LRU CACHE - GET (MISS)`, 'color: #ef4444; font-weight: bold');
+      console.log(`   Key: ${key.substring(0, 50)}...`);
+      console.log(`   Status: NOT FOUND`);
+      return null;
+    }
+    
+    console.log(`%c💾 LRU CACHE - GET (HIT)`, 'color: #10b981; font-weight: bold');
+    console.log(`   Key: ${key.substring(0, 50)}...`);
+    console.log(`   Action: Moving to most recent position`);
     const value = this.cache.get(key);
     this.cache.delete(key);
     this.cache.set(key, value);
+    
     return value;
   }
 
   set(key, value) {
     if (this.cache.has(key)) {
+      console.log(`%c💾 LRU CACHE - UPDATE`, 'color: #06b6d4; font-weight: bold');
+      console.log(`   Key: ${key.substring(0, 50)}...`);
+      console.log(`   Action: Updating existing entry`);
       this.cache.delete(key);
+    } else {
+      console.log(`%c💾 LRU CACHE - INSERT`, 'color: #06b6d4; font-weight: bold');
+      console.log(`   Key: ${key.substring(0, 50)}...`);
+      console.log(`   Action: Adding new entry`);
     }
+    
     this.cache.set(key, value);
+    
     if (this.cache.size > this.capacity) {
       const firstKey = this.cache.keys().next().value;
+      console.log(`%c💾 LRU CACHE - EVICTION`, 'color: #f59e0b; font-weight: bold');
+      console.log(`   Evicted Key: ${firstKey.substring(0, 50)}...`);
+      console.log(`   Reason: Cache capacity exceeded`);
       this.cache.delete(firstKey);
     }
+    console.log(`   Current Size: ${this.cache.size}/${this.capacity}`);
   }
 
   has(key) {
@@ -134,6 +458,10 @@ class HospitalHashMap {
 
   set(lat, lon, radius, hospitals) {
     const key = this.generateKey(lat, lon, radius);
+    console.log(`%c🗄️ HASHMAP - SET OPERATION`, 'color: #8b5cf6; font-weight: bold');
+    console.log(`   Key: ${key}`);
+    console.log(`   Hospitals Count: ${hospitals.length}`);
+    console.log(`   Timestamp: ${new Date().toLocaleTimeString()}`);
     this.map.set(key, {
       hospitals,
       timestamp: Date.now(),
@@ -143,12 +471,27 @@ class HospitalHashMap {
   get(lat, lon, radius) {
     const key = this.generateKey(lat, lon, radius);
     const data = this.map.get(key);
-    if (!data) return null;
+    
+    if (!data) {
+      console.log(`%c🗄️ HASHMAP - GET OPERATION (MISS)`, 'color: #ef4444; font-weight: bold');
+      console.log(`   Key: ${key}`);
+      console.log(`   Status: NOT FOUND`);
+      return null;
+    }
+    
     const ONE_HOUR = 60 * 60 * 1000;
     if (Date.now() - data.timestamp > ONE_HOUR) {
+      console.log(`%c🗄️ HASHMAP - GET OPERATION (EXPIRED)`, 'color: #f59e0b; font-weight: bold');
+      console.log(`   Key: ${key}`);
+      console.log(`   Status: CACHE EXPIRED`);
       this.map.delete(key);
       return null;
     }
+    
+    console.log(`%c🗄️ HASHMAP - GET OPERATION (HIT)`, 'color: #10b981; font-weight: bold');
+    console.log(`   Key: ${key}`);
+    console.log(`   Hospitals Retrieved: ${data.hospitals.length}`);
+    console.log(`   Cache Age: ${Math.floor((Date.now() - data.timestamp) / 1000 / 60)} minutes`);
     return data.hospitals;
   }
 
@@ -172,7 +515,8 @@ const PROVINCE_THRESHOLDS = {
 };
 
 const REFRESH_INTERVAL = 30 * 60 * 1000;
-const ORS_API_KEY = process.env.REACT_APP_ORS_KEY; // Demo key
+const WS_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws";
+const ORS_API_KEY = process.env.REACT_APP_ORS_KEY;
 
 // ========== API HELPERS ==========
 const fetchCoordinates = async (city) => {
@@ -181,6 +525,7 @@ const fetchCoordinates = async (city) => {
   );
   const json = await res.json();
   if (!json?.results?.length) throw new Error(`City "${city}" not found`);
+
   return {
     lat: json.results[0].latitude,
     lon: json.results[0].longitude,
@@ -192,9 +537,11 @@ const fetchWeatherData = async (lat, lon) => {
     `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&current=temperature_2m,precipitation&daily=precipitation_sum&timezone=auto`
   );
   const data = await res.json();
+
   if (!data?.current_weather || !data?.daily) {
     throw new Error("Weather API returned incomplete data");
   }
+
   return {
     temperature: data.current_weather.temperature,
     precipitation: data.daily.precipitation_sum?.[0] || 0,
@@ -205,31 +552,48 @@ const fetchWeatherData = async (lat, lon) => {
 const fetchNDVI = async (lat, lon) => {
   const today = new Date();
   const startDate = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+
   const formatDate = (d) => {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, "0");
     const day = String(d.getDate()).padStart(2, "0");
     return `${y}${m}${day}`;
   };
+
   const url = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=GWETROOT&community=AG&longitude=${lon}&latitude=${lat}&start=${formatDate(startDate)}&end=${formatDate(today)}&format=JSON`;
   const res = await fetch(url);
   const json = await res.json();
+
   if (!json?.properties?.parameter?.GWETROOT) {
     throw new Error("NDVI proxy (NASA POWER) returned incomplete data");
   }
+
   const gwet = json.properties.parameter.GWETROOT;
   const values = Object.values(gwet);
   const latest = values[values.length - 1];
+
   return Math.min(Math.max(latest / 0.5, 0), 1);
 };
 
 const fetchNDSI = async (lat, lon) => {
-  const res = await fetch(
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=snow_depth&timezone=auto`
-  );
-  const data = await res.json();
-  const snowDepth = data?.daily?.snow_depth?.[0] || 0;
-  return Math.min(Math.max(snowDepth / 100, 0), 1);
+  try {
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=snowfall_sum&timezone=auto`
+    );
+    
+    if (!res.ok) {
+      console.warn("Snow data unavailable for this location, defaulting to 0");
+      return 0;
+    }
+    
+    const data = await res.json();
+    const snowfall = data?.daily?.snowfall_sum?.[0] || 0;
+    
+    return Math.min(Math.max(snowfall / 10, 0), 1);
+  } catch (e) {
+    console.warn("NDSI fetch failed:", e.message);
+    return 0;
+  }
 };
 
 // ========== ROUTING HELPERS ==========
@@ -249,7 +613,9 @@ const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
     console.log("🎯 Using cached hospital data");
     return cachedHospitals;
   }
+
   console.log("🔍 Fetching hospitals from Overpass API...");
+  
   const query = `
     [out:json];
     node["amenity"="hospital"](around:${radius},${lat},${lon});
@@ -267,8 +633,10 @@ const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
       lat: item.lat,
       lon: item.lon,
     }));
+
     hospitalCache.set(lat, lon, radius, hospitals);
     console.log(`✅ Cached ${hospitals.length} hospitals`);
+
     return hospitals;
   } catch (e) {
     console.error("Overpass API Error:", e);
@@ -293,6 +661,7 @@ const checkFloodRisk = async (lat, lon, province) => {
     const weather = await fetchWeatherData(lat, lon);
     const ndvi = await fetchNDVI(lat, lon);
     const ndsi = await fetchNDSI(lat, lon);
+
     const payload = {
       year: new Date().getFullYear(),
       month: new Date().getMonth() + 1,
@@ -302,6 +671,7 @@ const checkFloodRisk = async (lat, lon, province) => {
       rain_mm: weather.precipitation,
       province: province || "Punjab",
     };
+
     const resp = await apiService.getFloodPrediction(payload);
     return resp.data;
   } catch (e) {
@@ -311,13 +681,15 @@ const checkFloodRisk = async (lat, lon, province) => {
 };
 
 const sampleRoutePoints = (routeCoords, numSamples = 15) => {
-  // Increased to 15 sample points for better coverage
   if (routeCoords.length <= numSamples) return routeCoords;
+
   const samples = [];
   const step = Math.floor(routeCoords.length / numSamples);
+
   for (let i = 0; i < numSamples; i++) {
     samples.push(routeCoords[i * step]);
   }
+
   // Always include start, middle, and end points
   if (!samples.some(p => p[0] === routeCoords[0][0])) {
     samples.unshift(routeCoords[0]);
@@ -325,16 +697,83 @@ const sampleRoutePoints = (routeCoords, numSamples = 15) => {
   if (!samples.some(p => p[0] === routeCoords[routeCoords.length - 1][0])) {
     samples.push(routeCoords[routeCoords.length - 1]);
   }
+
   return samples;
 };
 
+// ========== BUILD GRAPH FROM ROUTE DATA ==========
+const buildGraphFromRoute = async (routePath, province, userLocation, hospitals) => {
+  console.log(`%c🔨 GRAPH CONSTRUCTION - START`, 'color: #14b8a6; font-weight: bold; font-size: 14px');
+  console.log(`   Route Points: ${routePath.length}`);
+  console.log(`   Hospitals: ${hospitals.length}`);
+  console.log(`   Province: ${province}`);
+  
+  roadNetwork.clear();
+  console.log(`   Cleared existing graph`);
+
+  roadNetwork.addNode('user', userLocation.lat, userLocation.lon, 'intersection');
+
+  hospitals.forEach(hospital => {
+    roadNetwork.addNode(`hospital_${hospital.id}`, hospital.lat, hospital.lon, 'hospital');
+  });
+
+  const samples = sampleRoutePoints(routePath, 10);
+  console.log(`%c📍 WAYPOINT SAMPLING`, 'color: #a855f7; font-weight: bold');
+  console.log(`   Original Points: ${routePath.length}`);
+  console.log(`   Sampled Waypoints: ${samples.length}`);
+  
+  for (let i = 0; i < samples.length; i++) {
+    const nodeId = `intersection_${i}`;
+    roadNetwork.addNode(nodeId, samples[i][0], samples[i][1], 'intersection');
+
+    if (i > 0) {
+      const prevNodeId = i === 1 ? 'user' : `intersection_${i - 1}`;
+      const distance = calculateDistance(
+        samples[i - 1][0], samples[i - 1][1],
+        samples[i][0], samples[i][1]
+      );
+
+      const floodData = await checkFloodRisk(samples[i][0], samples[i][1], province);
+      const floodRisk = floodData && floodData.flood ? 
+        (floodData.severity === 'severe' ? 1.0 : floodData.severity === 'moderate' ? 0.6 : 0.3) : 0;
+
+      roadNetwork.addEdge(prevNodeId, nodeId, distance, floodRisk);
+    }
+  }
+
+  if (samples.length > 0 && hospitals.length > 0) {
+    const lastIntersection = `intersection_${samples.length - 1}`;
+    const nearestHospital = hospitals[0];
+    const distance = calculateDistance(
+      samples[samples.length - 1][0], samples[samples.length - 1][1],
+      nearestHospital.lat, nearestHospital.lon
+    );
+    roadNetwork.addEdge(lastIntersection, `hospital_${nearestHospital.id}`, distance, 0);
+  }
+
+  const stats = roadNetwork.getStats();
+  console.log(`%c✅ GRAPH CONSTRUCTION - COMPLETE`, 'color: #10b981; font-weight: bold; font-size: 14px');
+  console.log(`   Total Nodes: ${stats.nodes}`);
+  console.log(`   Total Edges: ${stats.edges}`);
+  console.log(`   High-Risk Edges: ${stats.highRiskEdges}`);
+  console.log(`   Intersections: ${stats.intersections}`);
+  console.log(`   Hospitals: ${stats.hospitals}`);
+};
+
 const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFloodZones = []) => {
+  console.log(`%c🗺️ ROUTING - START`, 'color: #ec4899; font-weight: bold; font-size: 14px');
+  console.log(`   From: [${start.lat.toFixed(4)}, ${start.lon.toFixed(4)}]`);
+  console.log(`   To: [${end.lat.toFixed(4)}, ${end.lon.toFixed(4)}]`);
+  console.log(`   Province: ${province}`);
+  console.log(`   Avoiding Flood Zones: ${avoidFloodZones.length}`);
+  
   if (!ORS_API_KEY) {
-    console.error("Missing ORS API Key");
+    console.error("❌ Missing ORS_API_KEY");
     return null;
   }
-  
+
   const cacheKey = `${start.lat.toFixed(4)},${start.lon.toFixed(4)}-${end.lat.toFixed(4)},${end.lon.toFixed(4)}-${province}-${avoidFloodZones.length}`;
+  
   const cachedRoute = routeCache.get(cacheKey);
   if (cachedRoute) {
     console.log("🎯 Using cached route data");
@@ -343,9 +782,9 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
     }
     return cachedRoute.routePath;
   }
-  
+
   console.log("🔍 Fetching route from OpenRouteService...");
-  
+
   try {
     // Build request body with avoid_polygons if we have flood zones
     let requestBody = {
@@ -370,7 +809,7 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
       };
       requestBody.options = { avoid_polygons: avoidPolygons };
     }
-    
+
     const res = await fetch(
       `https://api.openrouteservice.org/v2/directions/driving-car/geojson`,
       {
@@ -382,21 +821,29 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
         body: JSON.stringify(requestBody)
       }
     );
-    
+
     const data = await res.json();
-    
+
     if (!data.features || data.features.length === 0) return null;
-    
+
     if (data.features[0].geometry.coordinates) {
       const routePath = data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
+
       const samplePoints = sampleRoutePoints(routePath, 5);
       const floodChecks = [];
-      
-      console.log("🔍 Checking route for flood risks...");
-      
+
+      console.log(`%c🔍 FLOOD RISK ANALYSIS`, 'color: #3b82f6; font-weight: bold; font-size: 14px');
+      console.log(`   Total Route Points: ${routePath.length}`);
+      console.log(`   Sample Points: ${samplePoints.length}`);
+      console.log(`   Starting flood detection...`);
+
       for (const point of samplePoints) {
         const floodData = await checkFloodRisk(point[0], point[1], province);
         if (floodData && floodData.flood) {
+          console.log(`%c⚠️ FLOOD DETECTED!`, 'color: #ef4444; font-weight: bold');
+          console.log(`   Location: [${point[0].toFixed(4)}, ${point[1].toFixed(4)}]`);
+          console.log(`   Severity: ${floodData.severity.toUpperCase()}`);
+          console.log(`   Confidence: ${(floodData.confidence * 100).toFixed(0)}%`);
           floodChecks.push({
             lat: point[0],
             lon: point[1],
@@ -405,18 +852,24 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
           });
         }
       }
-      
+
       if (setFloodWarnings && floodChecks.length > 0) {
+        console.log(`%c⚠️ FLOOD SUMMARY`, 'color: #f59e0b; font-weight: bold; font-size: 14px');
+        console.log(`   Total Flood Zones: ${floodChecks.length}`);
+        console.log(`   Route Status: DANGEROUS`);
         setFloodWarnings(floodChecks);
+      } else {
+        console.log(`%c✅ ROUTE SAFE`, 'color: #10b981; font-weight: bold; font-size: 14px');
+        console.log(`   No flood zones detected on this route`);
       }
-      
+
       routeCache.set(cacheKey, {
         routePath,
         floodWarnings: floodChecks,
         timestamp: Date.now(),
       });
       console.log("✅ Route cached in LRU");
-      
+
       return routePath;
     }
     return [];
@@ -440,29 +893,36 @@ const MapReCenter = ({ bounds }) => {
 const computeThresholdExplanations = (features, province) => {
   const thresholds = PROVINCE_THRESHOLDS[province?.toLowerCase()] || PROVINCE_THRESHOLDS.punjab;
   const factors = [];
+
   if (features.precipitation >= thresholds.precipHigh) {
     factors.push(`Heavy daily precipitation: ${features.precipitation.toFixed(1)} mm`);
   } else if (features.precipitation >= thresholds.precipHigh * 0.6) {
     factors.push(`Moderate precipitation: ${features.precipitation.toFixed(1)} mm`);
   }
+
   if (features.temperature >= thresholds.tempHigh) {
     factors.push(`High temperature: ${features.temperature.toFixed(1)} °C`);
   }
+
   if (features.ndvi <= thresholds.ndviLow) {
     factors.push(`Low vegetation (NDVI ${features.ndvi.toFixed(3)}) — reduced infiltration`);
   }
+
   if (features.ndsi >= thresholds.ndsiSnow) {
     factors.push(`Snow/ice presence (NDSI ${features.ndsi.toFixed(3)}) — melt risk`);
   }
+
   if (features.rainfallCurrent > 0) {
     factors.push(`Currently raining: ${features.rainfallCurrent.toFixed(1)} mm`);
   }
+
   return factors;
 };
 
 const mapSeverityToUI = (mlResult) => {
   if (!mlResult) return { level: "UNKNOWN", color: "text-gray-400", icon: Info };
   if (!mlResult.flood) return { level: "LOW", color: "text-green-500", icon: CheckCircle };
+
   switch ((mlResult.severity || "").toLowerCase()) {
     case "severe":
     case "high":
@@ -486,16 +946,24 @@ function CitizenDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [showSOSModal, setShowSOSModal] = useState(false);
+
   const [userLocation, setUserLocation] = useState(null);
   const [nearestHospital, setNearestHospital] = useState(null);
   const [routePath, setRoutePath] = useState(null);
   const [routingLoading, setRoutingLoading] = useState(false);
   const [floodWarnings, setFloodWarnings] = useState([]);
   const [alternateHospitals, setAlternateHospitals] = useState([]);
+  const [pathDetails, setPathDetails] = useState(null);
+
   const [cacheStats, setCacheStats] = useState({ hospitals: 0, routes: 0 });
+  const [graphStats, setGraphStats] = useState(null);
   const [dummyMode, setDummyMode] = useState(false);
 
-  const user = {
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+
+  const user = JSON.parse(localStorage.getItem("user")) || {
     name: "Demo User",
     area: "Lahore",
     province: "Punjab",
@@ -507,27 +975,61 @@ function CitizenDashboard() {
         hospitals: hospitalCache.map.size,
         routes: routeCache.size(),
       });
+      setGraphStats(roadNetwork.getStats());
     };
     updateStats();
     const interval = setInterval(updateStats, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    let socket = new WebSocket(WS_URL);
+
+    socket.onopen = () => {
+      console.log("🔥 WebSocket Connected");
+      socket.send(JSON.stringify({ type: "join", role: "citizen" }));
+    };
+
+    socket.onmessage = (event) => {
+      console.log("📩 Message from server:", event.data);
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "sos-update") alert(`🚨 SOS Update: ${data.message}`);
+        if (data.type === "system-alert") alert(`⚠️ System Alert: ${data.message}`);
+      } catch (err) {
+        console.error("WS parse error", err);
+      }
+    };
+
+    socket.onclose = () => {
+      console.warn("WebSocket closed. Reconnecting in 3s...");
+    };
+
+    socket.onerror = (err) => {
+      console.error("WebSocket Error", err);
+    };
+
+    return () => socket.close();
+  }, []);
+
   const fetchAllDataAndPredict = async () => {
     setLoading(true);
     setError(null);
+
     try {
+      const location = await fetchCoordinates(user.area);
+      setCoords(location);
+
+      try {
+        const gps = await getUserLocation();
+        setUserLocation(gps);
+      } catch (e) {
+        console.warn("GPS Access Denied. Using City Center.");
+        setUserLocation(location);
+      }
+
       if (dummyMode) {
         console.log("🧪 DUMMY MODE: Using simulated flood data");
-        const location = await fetchCoordinates(user.area);
-        setCoords(location);
-        try {
-          const gps = await getUserLocation();
-          setUserLocation(gps);
-        } catch (e) {
-          console.warn("GPS Access Denied. Using City Center.");
-          setUserLocation(location);
-        }
         setFeatures(DUMMY_FLOOD_DATA.features);
         setMlResult(DUMMY_FLOOD_DATA.mlResult);
         const explanation = computeThresholdExplanations(DUMMY_FLOOD_DATA.features, user.province);
@@ -536,20 +1038,13 @@ function CitizenDashboard() {
         setLoading(false);
         return;
       }
-      const location = await fetchCoordinates(user.area);
-      setCoords(location);
-      try {
-        const gps = await getUserLocation();
-        setUserLocation(gps);
-      } catch (e) {
-        console.warn("GPS Access Denied. Using City Center.");
-        setUserLocation(location);
-      }
+
       const [weather, ndvi, ndsi] = await Promise.all([
         fetchWeatherData(location.lat, location.lon),
         fetchNDVI(location.lat, location.lon),
         fetchNDSI(location.lat, location.lon),
       ]);
+
       const combinedFeatures = {
         temperature: Number(weather.temperature),
         precipitation: Number(weather.precipitation),
@@ -559,7 +1054,9 @@ function CitizenDashboard() {
         snowfall: 0,
         cloudCover: 0,
       };
+
       setFeatures(combinedFeatures);
+
       const payload = {
         year: new Date().getFullYear(),
         month: new Date().getMonth() + 1,
@@ -569,10 +1066,13 @@ function CitizenDashboard() {
         rain_mm: combinedFeatures.precipitation,
         province: user.province || "Punjab",
       };
+
       const resp = await apiService.getFloodPrediction(payload);
       setMlResult(resp.data);
+
       const explanation = computeThresholdExplanations(combinedFeatures, user.province);
       setExplain(explanation);
+
       setLastUpdated(new Date());
     } catch (err) {
       console.error("fetch/predict error:", err);
@@ -589,31 +1089,61 @@ function CitizenDashboard() {
   }, [user.area, dummyMode]);
 
   const handleFindRoute = async () => {
+    console.log(`%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, 'color: #ec4899; font-weight: bold');
+    console.log(`%c🚀 ROUTE CALCULATION INITIATED`, 'color: #ec4899; font-weight: bold; font-size: 18px');
+    console.log(`%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, 'color: #ec4899; font-weight: bold');
+    
     if (!userLocation) {
+      console.log(`%c❌ ERROR: GPS location not available`, 'color: #ef4444; font-weight: bold');
       alert("Please enable GPS to find a route.");
       return;
     }
+    
+    console.log(`%c📍 USER LOCATION`, 'color: #3b82f6; font-weight: bold');
+    console.log(`   Latitude: ${userLocation.lat.toFixed(6)}`);
+    console.log(`   Longitude: ${userLocation.lon.toFixed(6)}`);
+    console.log(`   Province: ${user.province}`);
+    console.log(`   ─────────────────────────────────────────`);
+    
     setRoutingLoading(true);
     setRoutePath(null);
     setNearestHospital(null);
     setFloodWarnings([]);
     setAlternateHospitals([]);
+    setPathDetails(null);
 
     try {
+      console.log(`%c🔍 SEARCHING FOR NEARBY HOSPITALS`, 'color: #06b6d4; font-weight: bold; font-size: 14px');
+      console.log(`   Search Radius: 15 km`);
       const hospitals = await fetchNearbyHospitals(userLocation.lat, userLocation.lon, 15000);
+
       if (hospitals.length === 0) {
+        console.log(`%c❌ NO HOSPITALS FOUND`, 'color: #ef4444; font-weight: bold; font-size: 14px');
+        console.log(`   Search radius: 15 km`);
         alert("No hospitals found nearby (15km).");
         setRoutingLoading(false);
         return;
       }
+
+      console.log(`%c✅ HOSPITALS FOUND: ${hospitals.length}`, 'color: #10b981; font-weight: bold; font-size: 14px');
 
       const hospitalsWithDistance = hospitals.map((h) => ({
         ...h,
         distance: calculateDistance(userLocation.lat, userLocation.lon, h.lat, h.lon)
       })).sort((a, b) => a.distance - b.distance);
 
+      console.log(`%c📋 TOP 5 NEAREST HOSPITALS`, 'color: #8b5cf6; font-weight: bold');
+      hospitalsWithDistance.slice(0, 5).forEach((h, idx) => {
+        console.log(`   ${idx + 1}. ${h.name} - ${h.distance.toFixed(1)} km`);
+      });
+      console.log(`   ─────────────────────────────────────────`);
+
+      // DUMMY MODE SPECIAL HANDLING
       if (dummyMode && DUMMY_FLOOD_DATA.floodedRoute) {
-        console.log("🧪 DUMMY MODE: Injecting flood warnings on route");
+        console.log(`%c🧪 DUMMY MODE ACTIVATED`, 'color: #a855f7; font-weight: bold; font-size: 16px');
+        console.log(`   Injecting simulated flood data...`);
+        console.log(`   Flood Zones: ${DUMMY_FLOOD_DATA.routeWarnings.length}`);
+        
         const selectedHospital = hospitalsWithDistance[0];
         const dummyPath = [
           [userLocation.lat, userLocation.lon],
@@ -628,6 +1158,17 @@ function CitizenDashboard() {
           [userLocation.lat + 0.015, userLocation.lon + 0.025],
           [safeHospital.lat, safeHospital.lon]
         ];
+        
+        console.log(`%c⚠️ SIMULATED FLOODED ROUTE`, 'color: #ef4444; font-weight: bold');
+        console.log(`   Hospital: ${selectedHospital.name}`);
+        console.log(`   Distance: ${selectedHospital.distance.toFixed(1)} km`);
+        console.log(`   Flood Zones: ${DUMMY_FLOOD_DATA.routeWarnings.length}`);
+        
+        console.log(`%c✅ SIMULATED SAFE ALTERNATE`, 'color: #10b981; font-weight: bold');
+        console.log(`   Hospital: ${safeHospital.name}`);
+        console.log(`   Distance: ${safeHospital.distance.toFixed(1)} km`);
+        console.log(`   Flood Zones: 0`);
+        
         setNearestHospital(selectedHospital);
         setRoutePath(dummyPath);
         setFloodWarnings(DUMMY_FLOOD_DATA.routeWarnings);
@@ -638,6 +1179,19 @@ function CitizenDashboard() {
           isSafe: idx === 0
         }));
         setAlternateHospitals(alternates);
+        
+        // Simulate path details
+        setPathDetails({
+          totalDistance: 5.2,
+          averageRisk: 0.68,
+          highRiskSegments: 2,
+          waypoints: 4,
+          segments: []
+        });
+        
+        console.log(`%c🧪 DUMMY MODE COMPLETE`, 'color: #a855f7; font-weight: bold; font-size: 14px');
+        console.log(`   Simulated scenario displayed successfully`);
+        
         alert(`⚠️ [DUMMY MODE] WARNING: Flood risk detected on route to ${selectedHospital.name}!\n\n` +
           `${DUMMY_FLOOD_DATA.routeWarnings.length} flood zone(s) detected along the path.\n` +
           `🟢 SAFE ALTERNATE ROUTE displayed to ${safeHospital.name} (green line)`);
@@ -645,7 +1199,11 @@ function CitizenDashboard() {
         return;
       }
 
-      console.log(`🔍 Checking routes to ${Math.min(5, hospitalsWithDistance.length)} hospitals...`);
+      // REAL MODE PROCESSING
+      console.log(`%c🏥 HOSPITAL ROUTE ANALYSIS - START`, 'color: #ec4899; font-weight: bold; font-size: 16px');
+      console.log(`   User Location: [${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}]`);
+      console.log(`   Hospitals to Check: ${Math.min(5, hospitalsWithDistance.length)}`);
+      console.log(`   =====================================`);
       const routeResults = [];
       
       // First pass: Get initial routes and detect flood zones
@@ -653,7 +1211,8 @@ function CitizenDashboard() {
       
       for (let i = 0; i < Math.min(5, hospitalsWithDistance.length); i++) {
         const hospital = hospitalsWithDistance[i];
-        console.log(`🏥 ${i + 1}. Checking: ${hospital.name} (${hospital.distance.toFixed(1)}km)`);
+        console.log(`%c🏥 Hospital ${i + 1}: ${hospital.name}`, 'color: #06b6d4; font-weight: bold');
+        console.log(`   Distance: ${hospital.distance.toFixed(1)} km`);
 
         const tempWarnings = [];
         const path = await getOptimizedRoute(
@@ -665,6 +1224,21 @@ function CitizenDashboard() {
         );
 
         if (path) {
+          // Build graph for this route
+          await buildGraphFromRoute(path, user.province, userLocation, hospitalsWithDistance);
+
+          // Use A* algorithm
+          const pathResult = roadNetwork.findShortestPathAStar('user', `hospital_${hospital.id}`, true);
+
+          if (pathResult) {
+            const details = roadNetwork.getPathDetails(pathResult.path);
+            console.log(`%c📊 PATH ANALYSIS`, 'color: #a855f7; font-weight: bold');
+            console.log(`   Total Distance: ${details.totalDistance.toFixed(2)} km`);
+            console.log(`   Average Risk: ${(details.averageRisk * 100).toFixed(0)}%`);
+            console.log(`   High-Risk Segments: ${details.highRiskSegments}`);
+            console.log(`   Waypoints: ${details.waypoints}`);
+          }
+
           routeResults.push({
             hospital,
             path,
@@ -679,18 +1253,26 @@ function CitizenDashboard() {
               w.severity && ['severe', 'high', 'critical'].includes(w.severity.toLowerCase())
             );
             initialFloodZones.push(...highRiskZones);
-            console.log(`   ⚠️ ${tempWarnings.length} flood zones (${highRiskZones.length} high-risk)`);
+            console.log(`   ⚠️ Flood Zones: ${tempWarnings.length} (${highRiskZones.length} high-risk)`);
           } else {
-            console.log(`   ✅ 0 flood zones`);
+            console.log(`   ✅ Flood Zones: 0 (SAFE ROUTE)`);
           }
+          console.log(`   =====================================`);
         }
       }
 
       if (routeResults.length === 0) {
+        console.log(`%c❌ ROUTING FAILED`, 'color: #ef4444; font-weight: bold; font-size: 14px');
+        console.log(`   No routes could be calculated`);
         alert("Could not calculate any driving routes (ORS API error).");
         setRoutingLoading(false);
         return;
       }
+
+      console.log(`%c📊 ROUTE COMPARISON`, 'color: #8b5cf6; font-weight: bold; font-size: 14px');
+      console.log(`   Total Routes Analyzed: ${routeResults.length}`);
+      console.log(`   Safe Routes: ${routeResults.filter(r => r.isSafe).length}`);
+      console.log(`   Dangerous Routes: ${routeResults.filter(r => !r.isSafe).length}`);
 
       // Sort by safety first
       routeResults.sort((a, b) => {
@@ -701,10 +1283,17 @@ function CitizenDashboard() {
       });
 
       const primaryRoute = routeResults[0];
+      console.log(`%c🎯 PRIMARY ROUTE SELECTED`, 'color: #3b82f6; font-weight: bold; font-size: 14px');
+      console.log(`   Hospital: ${primaryRoute.hospital.name}`);
+      console.log(`   Distance: ${primaryRoute.hospital.distance.toFixed(1)} km`);
+      console.log(`   Safety Status: ${primaryRoute.isSafe ? 'SAFE ✅' : 'DANGEROUS ⚠️'}`);
+      console.log(`   Flood Zones: ${primaryRoute.warnings.length}`);
       
       // If primary route has HIGH-RISK floods, try to reroute avoiding them
       if (!primaryRoute.isSafe && initialFloodZones.length > 0) {
-        console.log(`🔄 High-risk floods detected. Attempting reroute avoiding ${initialFloodZones.length} danger zones...`);
+        console.log(`%c🔄 ATTEMPTING REROUTE`, 'color: #f59e0b; font-weight: bold; font-size: 14px');
+        console.log(`   Reason: High-risk floods detected`);
+        console.log(`   Avoiding ${initialFloodZones.length} danger zones...`);
         
         const rerouteWarnings = [];
         const reroutePath = await getOptimizedRoute(
@@ -716,14 +1305,31 @@ function CitizenDashboard() {
         );
         
         if (reroutePath && rerouteWarnings.length < primaryRoute.warnings.length) {
-          console.log(`✅ Reroute successful! Reduced flood zones from ${primaryRoute.warnings.length} to ${rerouteWarnings.length}`);
+          console.log(`%c✅ REROUTE SUCCESSFUL!`, 'color: #10b981; font-weight: bold; font-size: 14px');
+          console.log(`   Flood Zones Reduced: ${primaryRoute.warnings.length} → ${rerouteWarnings.length}`);
           primaryRoute.path = reroutePath;
           primaryRoute.warnings = rerouteWarnings;
           primaryRoute.isSafe = rerouteWarnings.length === 0;
           primaryRoute.riskScore = rerouteWarnings.length;
         } else if (reroutePath) {
-          console.log(`⚠️ Reroute attempted but similar risk level maintained`);
+          console.log(`%c⚠️ REROUTE ATTEMPTED`, 'color: #f59e0b; font-weight: bold');
+          console.log(`   Status: Similar risk level maintained`);
         }
+      }
+
+      console.log(`%c🔨 FINAL GRAPH CONSTRUCTION`, 'color: #14b8a6; font-weight: bold; font-size: 14px');
+      // Build final graph and get path details
+      await buildGraphFromRoute(primaryRoute.path, user.province, userLocation, hospitalsWithDistance);
+      const pathResult = roadNetwork.findShortestPathAStar('user', `hospital_${primaryRoute.hospital.id}`, true);
+
+      if (pathResult) {
+        const details = roadNetwork.getPathDetails(pathResult.path);
+        console.log(`%c📈 FINAL PATH STATISTICS`, 'color: #a855f7; font-weight: bold; font-size: 14px');
+        console.log(`   Total Distance: ${details.totalDistance.toFixed(2)} km`);
+        console.log(`   Average Risk: ${(details.averageRisk * 100).toFixed(1)}%`);
+        console.log(`   High-Risk Segments: ${details.highRiskSegments}`);
+        console.log(`   Total Waypoints: ${details.waypoints}`);
+        setPathDetails(details);
       }
 
       setNearestHospital(primaryRoute.hospital);
@@ -738,6 +1344,20 @@ function CitizenDashboard() {
         riskScore: r.riskScore
       }));
       setAlternateHospitals(alternates);
+
+      console.log(`%c🏁 ROUTING COMPLETE - SUMMARY`, 'color: #10b981; font-weight: bold; font-size: 16px');
+      console.log(`   ═══════════════════════════════════════`);
+      console.log(`   PRIMARY ROUTE:`);
+      console.log(`     → ${primaryRoute.hospital.name}`);
+      console.log(`     → Distance: ${primaryRoute.hospital.distance.toFixed(1)} km`);
+      console.log(`     → Status: ${primaryRoute.isSafe ? '✅ SAFE' : '⚠️ DANGEROUS'}`);
+      console.log(`     → Flood Zones: ${primaryRoute.warnings.length}`);
+      console.log(`   ───────────────────────────────────────`);
+      console.log(`   ALTERNATE ROUTES: ${alternates.length}`);
+      alternates.forEach((alt, idx) => {
+        console.log(`     ${idx + 1}. ${alt.name} - ${alt.distance.toFixed(1)} km (${alt.isSafe ? '✅' : '⚠️ ' + alt.riskScore + ' floods'})`);
+      });
+      console.log(`   ═══════════════════════════════════════`);
 
       if (primaryRoute.isSafe) {
         const floodedCount = routeResults.filter(r => !r.isSafe).length;
@@ -808,6 +1428,7 @@ function CitizenDashboard() {
 
   return (
     <div className="p-6 max-w-6xl mx-auto bg-slate-900 text-white min-h-screen">
+      {/* Header */}
       <div className="flex justify-between items-start mb-6">
         <div>
           <h1 className="text-3xl font-bold mb-2">Welcome, {user.name} 👋</h1>
@@ -821,9 +1442,16 @@ function CitizenDashboard() {
               <span>Last updated: {lastUpdated.toLocaleString()}</span>
             </div>
           )}
+          
+          {/* Stats */}
           <div className="flex items-center gap-4 text-xs text-gray-500 mt-2">
             <span>🗄️ Cache: {cacheStats.hospitals} hospitals | {cacheStats.routes} routes</span>
+            {graphStats && (
+              <span>📊 Graph: {graphStats.nodes} nodes | {graphStats.edges} edges | {graphStats.highRiskEdges} high-risk</span>
+            )}
           </div>
+
+          {/* Dummy Mode Toggle */}
           <div className="mt-3 flex items-center gap-3">
             <button
               onClick={() => setDummyMode(!dummyMode)}
@@ -842,7 +1470,16 @@ function CitizenDashboard() {
             )}
           </div>
         </div>
+
         <div className="flex gap-2">
+          <button
+            onClick={() => setShowSOSModal(true)}
+            className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-white flex items-center gap-2 transition-colors animate-pulse"
+          >
+            <AlertTriangle className="h-4 w-4" />
+            Emergency SOS
+          </button>
+
           <button
             onClick={fetchAllDataAndPredict}
             disabled={loading}
@@ -854,6 +1491,7 @@ function CitizenDashboard() {
         </div>
       </div>
 
+      {/* ML Result Alert */}
       {mlResult && (
         <div
           className={`mb-6 p-6 rounded-lg border ${
@@ -878,6 +1516,7 @@ function CitizenDashboard() {
               </p>
             </div>
           </div>
+
           {mlResult?.explanation && (
             <div className="mt-4">
               <p className="font-semibold flex items-center gap-2">
@@ -894,12 +1533,13 @@ function CitizenDashboard() {
         </div>
       )}
 
+      {/* Map Section */}
       {coords && (
         <div className="mb-6 relative z-10">
           <div className="flex justify-between items-center mb-3">
             <h2 className="text-xl font-bold flex items-center gap-2">
               <Navigation className="h-5 w-5 text-blue-400" />
-              Live Evacuation Map
+              Live Evacuation Map 
             </h2>
             <button
               onClick={handleFindRoute}
@@ -912,6 +1552,39 @@ function CitizenDashboard() {
               {routingLoading ? "Calculating..." : "Find Safe Route"}
             </button>
           </div>
+
+          {/* Path Details */}
+          {pathDetails && (
+            <div className="mb-4 bg-slate-800 rounded-lg p-4">
+              <h3 className="font-bold mb-2 text-cyan-400">📊 Path Analysis (A* Algorithm)</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div>
+                  <span className="text-gray-400">Distance:</span>
+                  <p className="font-bold">{pathDetails.totalDistance.toFixed(2)} km</p>
+                </div>
+                <div>
+                  <span className="text-gray-400">Avg Risk:</span>
+                  <p className={`font-bold ${
+                    pathDetails.averageRisk > 0.5 ? 'text-red-400' : 
+                    pathDetails.averageRisk > 0.3 ? 'text-orange-400' : 
+                    'text-green-400'
+                  }`}>
+                    {(pathDetails.averageRisk * 100).toFixed(0)}%
+                  </p>
+                </div>
+                <div>
+                  <span className="text-gray-400">Waypoints:</span>
+                  <p className="font-bold">{pathDetails.waypoints}</p>
+                </div>
+                <div>
+                  <span className="text-gray-400">High-Risk Segments:</span>
+                  <p className={`font-bold ${pathDetails.highRiskSegments > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {pathDetails.highRiskSegments}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="relative z-10 w-full h-[400px] overflow-hidden rounded-lg shadow-lg">
             <MapContainer
@@ -1168,6 +1841,7 @@ function CitizenDashboard() {
         </div>
       )}
 
+      {/* Features Grid */}
       {features && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           <div className="bg-slate-800 p-5 rounded-lg">
@@ -1225,6 +1899,12 @@ function CitizenDashboard() {
           </ul>
         </div>
       )}
+
+      <SOSRequestModal
+        isOpen={showSOSModal}
+        onClose={() => setShowSOSModal(false)}
+        user={user}
+      />
     </div>
   );
 }

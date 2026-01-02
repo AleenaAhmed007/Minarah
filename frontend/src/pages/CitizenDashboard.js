@@ -2,7 +2,6 @@
 import React, { useEffect, useState } from "react";
 import { MapContainer, TileLayer, Circle, Marker, Popup, Polyline, useMap } from "react-leaflet";
 import L from "leaflet";
-import polyline from "@mapbox/polyline";
 import {
   AlertTriangle,
   MapPin,
@@ -23,6 +22,296 @@ import apiService from "../services/apiService";
 import SOSRequestModal from "../components/SOSRequestModal";
 import { useAuth } from "../auth/AuthProvider";
 import { useNavigate } from "react-router-dom";
+
+// ========== PRIORITY QUEUE FOR A* ALGORITHM ==========
+class PriorityQueue {
+  constructor() {
+    this.items = [];
+  }
+
+  enqueue(element, priority) {
+    const queueElement = { element, priority };
+    let added = false;
+
+    for (let i = 0; i < this.items.length; i++) {
+      if (queueElement.priority < this.items[i].priority) {
+        this.items.splice(i, 0, queueElement);
+        added = true;
+        break;
+      }
+    }
+
+    if (!added) {
+      this.items.push(queueElement);
+    }
+  }
+
+  dequeue() {
+    return this.items.shift();
+  }
+
+  isEmpty() {
+    return this.items.length === 0;
+  }
+
+  size() {
+    return this.items.length;
+  }
+}
+
+// ========== GRAPH DATA STRUCTURE (ADJACENCY LIST) ==========
+class RoadNetworkGraph {
+  constructor() {
+    this.adjacencyList = new Map();
+    this.nodes = new Map();
+  }
+
+  addNode(id, lat, lon, type = 'intersection') {
+    if (!this.nodes.has(id)) {
+      this.nodes.set(id, { id, lat, lon, type });
+      this.adjacencyList.set(id, []);
+    }
+  }
+
+  addEdge(from, to, distance, floodRisk = 0) {
+    if (!this.adjacencyList.has(from)) {
+      this.addNode(from, 0, 0);
+    }
+    if (!this.adjacencyList.has(to)) {
+      this.addNode(to, 0, 0);
+    }
+
+    // Bidirectional edge
+    this.adjacencyList.get(from).push({
+      neighbor: to,
+      distance,
+      floodRisk,
+      weight: distance * (1 + floodRisk * 10)
+    });
+
+    this.adjacencyList.get(to).push({
+      neighbor: from,
+      distance,
+      floodRisk,
+      weight: distance * (1 + floodRisk * 10)
+    });
+  }
+
+  updateFloodRisk(from, to, newFloodRisk) {
+    const updateEdge = (source, target) => {
+      const edges = this.adjacencyList.get(source);
+      if (edges) {
+        const edge = edges.find(e => e.neighbor === target);
+        if (edge) {
+          edge.floodRisk = newFloodRisk;
+          edge.weight = edge.distance * (1 + newFloodRisk * 10);
+        }
+      }
+    };
+
+    updateEdge(from, to);
+    updateEdge(to, from);
+  }
+
+  getNeighbors(nodeId) {
+    return this.adjacencyList.get(nodeId) || [];
+  }
+
+  getNode(nodeId) {
+    return this.nodes.get(nodeId);
+  }
+
+  getNodesByType(type) {
+    return Array.from(this.nodes.values()).filter(node => node.type === type);
+  }
+
+  // ========== HEURISTIC FUNCTION (Haversine Distance) ==========
+  calculateHeuristic(nodeId, goalId) {
+    const node = this.getNode(nodeId);
+    const goal = this.getNode(goalId);
+    
+    if (!node || !goal) return 0;
+
+    // Haversine formula for great-circle distance
+    const R = 6371; // Earth's radius in km
+    const dLat = ((goal.lat - node.lat) * Math.PI) / 180;
+    const dLon = ((goal.lon - node.lon) * Math.PI) / 180;
+    
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((node.lat * Math.PI) / 180) *
+      Math.cos((goal.lat * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+    
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  // ========== A* ALGORITHM IMPLEMENTATION ==========
+  findShortestPathAStar(startId, endId, preferSafety = true) {
+    console.log(`🔍 A* Pathfinding: ${startId} → ${endId}`);
+    
+    const openSet = new PriorityQueue();
+    const closedSet = new Set();
+    
+    // Track actual cost from start (g-score)
+    const gScore = new Map();
+    // Track estimated total cost (f-score = g + h)
+    const fScore = new Map();
+    // Track path
+    const cameFrom = new Map();
+    
+    // Initialize
+    for (const nodeId of this.nodes.keys()) {
+      gScore.set(nodeId, Infinity);
+      fScore.set(nodeId, Infinity);
+    }
+    
+    gScore.set(startId, 0);
+    fScore.set(startId, this.calculateHeuristic(startId, endId));
+    
+    openSet.enqueue(startId, fScore.get(startId));
+    
+    let nodesExplored = 0;
+    
+    while (!openSet.isEmpty()) {
+      const current = openSet.dequeue().element;
+      nodesExplored++;
+      
+      // Goal reached!
+      if (current === endId) {
+        console.log(`✅ A* found path! Explored ${nodesExplored} nodes`);
+        return this.reconstructPath(cameFrom, current, gScore);
+      }
+      
+      closedSet.add(current);
+      
+      // Explore neighbors
+      const neighbors = this.getNeighbors(current);
+      
+      for (const edge of neighbors) {
+        const neighbor = edge.neighbor;
+        
+        if (closedSet.has(neighbor)) continue;
+        
+        // Calculate tentative g-score
+        const weight = preferSafety ? edge.weight : edge.distance;
+        const tentativeGScore = gScore.get(current) + weight;
+        
+        if (tentativeGScore < gScore.get(neighbor)) {
+          // This path is better!
+          cameFrom.set(neighbor, current);
+          gScore.set(neighbor, tentativeGScore);
+          
+          // f(n) = g(n) + h(n)
+          const heuristic = this.calculateHeuristic(neighbor, endId);
+          fScore.set(neighbor, tentativeGScore + heuristic);
+          
+          // Add to open set if not already there
+          openSet.enqueue(neighbor, fScore.get(neighbor));
+        }
+      }
+    }
+    
+    console.log(`❌ A* could not find path after exploring ${nodesExplored} nodes`);
+    return null;
+  }
+
+    // ========== RECONSTRUCT PATH ==========
+  reconstructPath(cameFrom, current, scores) {
+    const path = [];
+    
+    while (current !== undefined) {
+      path.unshift(current);
+      current = cameFrom.get(current);
+    }
+
+    if (path.length === 0) return null;
+
+    return {
+      path,
+      distance: scores.get(path[path.length - 1]),
+      nodes: path.map(id => this.getNode(id))
+    };
+  }
+
+  // ========== PATH ANALYSIS ==========
+  getPathFloodRisk(path) {
+    let totalRisk = 0;
+    let count = 0;
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const edges = this.getNeighbors(path[i]);
+      const edge = edges.find(e => e.neighbor === path[i + 1]);
+      if (edge) {
+        totalRisk += edge.floodRisk;
+        count++;
+      }
+    }
+
+    return count > 0 ? totalRisk / count : 0;
+  }
+
+  getPathDetails(path) {
+    let totalDistance = 0;
+    let totalRisk = 0;
+    let highRiskSegments = 0;
+    const segments = [];
+
+    for (let i = 0; i < path.length - 1; i++) {
+      const edges = this.getNeighbors(path[i]);
+      const edge = edges.find(e => e.neighbor === path[i + 1]);
+      
+      if (edge) {
+        totalDistance += edge.distance;
+        totalRisk += edge.floodRisk;
+        if (edge.floodRisk > 0.5) highRiskSegments++;
+        
+        segments.push({
+          from: path[i],
+          to: path[i + 1],
+          distance: edge.distance,
+          floodRisk: edge.floodRisk,
+          weight: edge.weight
+        });
+      }
+    }
+
+    return {
+      totalDistance,
+      averageRisk: path.length > 1 ? totalRisk / (path.length - 1) : 0,
+      highRiskSegments,
+      segments,
+      waypoints: path.length
+    };
+  }
+
+  clear() {
+    this.adjacencyList.clear();
+    this.nodes.clear();
+  }
+
+  getStats() {
+    let totalEdges = 0;
+    let highRiskEdges = 0;
+
+    for (const edges of this.adjacencyList.values()) {
+      totalEdges += edges.length;
+      highRiskEdges += edges.filter(e => e.floodRisk > 0.5).length;
+    }
+
+    return {
+      nodes: this.nodes.size,
+      edges: totalEdges / 2,
+      highRiskEdges: highRiskEdges / 2,
+      intersections: this.getNodesByType('intersection').length,
+      hospitals: this.getNodesByType('hospital').length,
+      shelters: this.getNodesByType('shelter').length,
+    };
+  }
+}
+
+// ========== GLOBAL GRAPH INSTANCE ==========
+const roadNetwork = new RoadNetworkGraph();
 
 // ========== ICONS CONFIG ==========
 delete L.Icon.Default.prototype._getIconUrl;
@@ -54,7 +343,6 @@ class LRUCache {
   get(key) {
     if (!this.cache.has(key)) return null;
     
-    // Move to end (most recently used)
     const value = this.cache.get(key);
     this.cache.delete(key);
     this.cache.set(key, value);
@@ -63,15 +351,12 @@ class LRUCache {
   }
 
   set(key, value) {
-    // Delete if exists (to update position)
     if (this.cache.has(key)) {
       this.cache.delete(key);
     }
     
-    // Add to end
     this.cache.set(key, value);
     
-    // Remove oldest if over capacity
     if (this.cache.size > this.capacity) {
       const firstKey = this.cache.keys().next().value;
       this.cache.delete(firstKey);
@@ -97,9 +382,7 @@ class HospitalHashMap {
     this.map = new Map();
   }
 
-  // Generate key based on location and radius
   generateKey(lat, lon, radius) {
-    // Round to 3 decimal places to group nearby locations
     const roundedLat = Math.round(lat * 1000) / 1000;
     const roundedLon = Math.round(lon * 1000) / 1000;
     return `${roundedLat},${roundedLon},${radius}`;
@@ -119,7 +402,6 @@ class HospitalHashMap {
     
     if (!data) return null;
     
-    // Cache expires after 1 hour
     const ONE_HOUR = 60 * 60 * 1000;
     if (Date.now() - data.timestamp > ONE_HOUR) {
       this.map.delete(key);
@@ -136,7 +418,7 @@ class HospitalHashMap {
 
 // ========== GLOBAL CACHE INSTANCES ==========
 const hospitalCache = new HospitalHashMap();
-const routeCache = new LRUCache(50); // Store up to 50 routes
+const routeCache = new LRUCache(50);
 
 // ========== CONSTANTS ==========
 const PROVINCE_THRESHOLDS = {
@@ -148,7 +430,7 @@ const PROVINCE_THRESHOLDS = {
   islamabad: { precipHigh: 90, tempHigh: 34, ndviLow: 0.25, ndsiSnow: 0.3 },
 };
 
-const REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes
+const REFRESH_INTERVAL = 30 * 60 * 1000;
 const WS_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws";
 const ORS_API_KEY = process.env.REACT_APP_ORS_KEY;
 
@@ -210,18 +492,28 @@ const fetchNDVI = async (lat, lon) => {
 };
 
 const fetchNDSI = async (lat, lon) => {
-  const res = await fetch(
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=snow_depth&timezone=auto`
-  );
-  const data = await res.json();
-  const snowDepth = data?.daily?.snow_depth?.[0] || 0;
-
-  return Math.min(Math.max(snowDepth / 100, 0), 1);
+  try {
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=snowfall_sum&timezone=auto`
+    );
+    
+    if (!res.ok) {
+      console.warn("Snow data unavailable for this location, defaulting to 0");
+      return 0;
+    }
+    
+    const data = await res.json();
+    const snowfall = data?.daily?.snowfall_sum?.[0] || 0;
+    
+    return Math.min(Math.max(snowfall / 10, 0), 1);
+  } catch (e) {
+    console.warn("NDSI fetch failed:", e.message);
+    return 0;
+  }
 };
 
 // ========== ROUTING HELPERS ==========
 
-// 1. Get Live GPS
 const getUserLocation = () => {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) reject("Geolocation not supported");
@@ -232,9 +524,7 @@ const getUserLocation = () => {
   });
 };
 
-// 2. Find Nearest Hospital (Overpass API) - WITH HASH MAP CACHING
 const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
-  // Check cache first
   const cachedHospitals = hospitalCache.get(lat, lon, radius);
   if (cachedHospitals) {
     console.log("🎯 Using cached hospital data");
@@ -261,7 +551,6 @@ const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
       lon: item.lon,
     }));
 
-    // Store in cache
     hospitalCache.set(lat, lon, radius, hospitals);
     console.log(`✅ Cached ${hospitals.length} hospitals`);
 
@@ -272,7 +561,6 @@ const fetchNearbyHospitals = async (lat, lon, radius = 15000) => {
   }
 };
 
-// 3. Calculate Distance
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -285,7 +573,6 @@ const calculateDistance = (lat1, lon1, lat2, lon2) => {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
-// 4. Check Flood Risk for Coordinates
 const checkFloodRisk = async (lat, lon, province) => {
   try {
     const weather = await fetchWeatherData(lat, lon);
@@ -310,7 +597,6 @@ const checkFloodRisk = async (lat, lon, province) => {
   }
 };
 
-// 5. Sample Route Points for Flood Check
 const sampleRoutePoints = (routeCoords, numSamples = 5) => {
   if (routeCoords.length <= numSamples) return routeCoords;
 
@@ -324,17 +610,60 @@ const sampleRoutePoints = (routeCoords, numSamples = 5) => {
   return samples;
 };
 
-// 6. Get Optimized Route with Flood Checking (OpenRouteService) - WITH LRU CACHE
+// ========== BUILD GRAPH FROM ROUTE DATA ==========
+const buildGraphFromRoute = async (routePath, province, userLocation, hospitals) => {
+  console.log("🔨 Building road network graph...");
+  
+  roadNetwork.clear();
+
+  roadNetwork.addNode('user', userLocation.lat, userLocation.lon, 'intersection');
+
+  hospitals.forEach(hospital => {
+    roadNetwork.addNode(`hospital_${hospital.id}`, hospital.lat, hospital.lon, 'hospital');
+  });
+
+  const samples = sampleRoutePoints(routePath, 10);
+  
+  for (let i = 0; i < samples.length; i++) {
+    const nodeId = `intersection_${i}`;
+    roadNetwork.addNode(nodeId, samples[i][0], samples[i][1], 'intersection');
+
+    if (i > 0) {
+      const prevNodeId = i === 1 ? 'user' : `intersection_${i - 1}`;
+      const distance = calculateDistance(
+        samples[i - 1][0], samples[i - 1][1],
+        samples[i][0], samples[i][1]
+      );
+
+      const floodData = await checkFloodRisk(samples[i][0], samples[i][1], province);
+      const floodRisk = floodData && floodData.flood ? 
+        (floodData.severity === 'severe' ? 1.0 : floodData.severity === 'moderate' ? 0.6 : 0.3) : 0;
+
+      roadNetwork.addEdge(prevNodeId, nodeId, distance, floodRisk);
+    }
+  }
+
+  if (samples.length > 0 && hospitals.length > 0) {
+    const lastIntersection = `intersection_${samples.length - 1}`;
+    const nearestHospital = hospitals[0];
+    const distance = calculateDistance(
+      samples[samples.length - 1][0], samples[samples.length - 1][1],
+      nearestHospital.lat, nearestHospital.lon
+    );
+    roadNetwork.addEdge(lastIntersection, `hospital_${nearestHospital.id}`, distance, 0);
+  }
+
+  console.log("✅ Graph built:", roadNetwork.getStats());
+};
+
 const getOptimizedRoute = async (start, end, province, setFloodWarnings) => {
   if (!ORS_API_KEY) {
     console.error("Missing ORS API Key");
     return null;
   }
 
-  // Generate cache key
   const cacheKey = `${start.lat.toFixed(4)},${start.lon.toFixed(4)}-${end.lat.toFixed(4)},${end.lon.toFixed(4)}-${province}`;
   
-  // Check LRU cache
   const cachedRoute = routeCache.get(cacheKey);
   if (cachedRoute) {
     console.log("🎯 Using cached route data");
@@ -378,7 +707,6 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings) => {
         setFloodWarnings(floodChecks);
       }
 
-      // Store in LRU cache
       routeCache.set(cacheKey, {
         routePath,
         floodWarnings: floodChecks,
@@ -395,7 +723,6 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings) => {
   }
 };
 
-// Helper: Auto-zoom map to route
 const MapReCenter = ({ bounds }) => {
   const map = useMap();
   useEffect(() => {
@@ -465,16 +792,17 @@ function CitizenDashboard() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [showSOSModal, setShowSOSModal] = useState(false);
 
-  // Routing State
   const [userLocation, setUserLocation] = useState(null);
   const [nearestHospital, setNearestHospital] = useState(null);
   const [routePath, setRoutePath] = useState(null);
   const [routingLoading, setRoutingLoading] = useState(false);
   const [floodWarnings, setFloodWarnings] = useState([]);
   const [alternateHospitals, setAlternateHospitals] = useState([]);
+  const [pathDetails, setPathDetails] = useState(null);
 
-  // Cache Statistics
   const [cacheStats, setCacheStats] = useState({ hospitals: 0, routes: 0 });
+  const [graphStats, setGraphStats] = useState(null);
+  const [useAStar, setUseAStar] = useState(true); // Toggle between A* and Dijkstra
 
   const { logout } = useAuth();
   const navigate = useNavigate();
@@ -485,20 +813,19 @@ function CitizenDashboard() {
     province: "Punjab",
   };
 
-  // Update cache stats
   useEffect(() => {
     const updateStats = () => {
       setCacheStats({
         hospitals: hospitalCache.map.size,
         routes: routeCache.size(),
       });
+      setGraphStats(roadNetwork.getStats());
     };
     updateStats();
     const interval = setInterval(updateStats, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  // ========================= WebSocket Handling =========================
   useEffect(() => {
     let socket = new WebSocket(WS_URL);
 
@@ -520,9 +847,6 @@ function CitizenDashboard() {
 
     socket.onclose = () => {
       console.warn("WebSocket closed. Reconnecting in 3s...");
-      setTimeout(() => {
-        // window.location.reload();
-      }, 3000);
     };
 
     socket.onerror = (err) => {
@@ -532,7 +856,6 @@ function CitizenDashboard() {
     return () => socket.close();
   }, []);
 
-  // ========== MAIN DATA FETCH ==========
   const fetchAllDataAndPredict = async () => {
     setLoading(true);
     setError(null);
@@ -596,10 +919,8 @@ function CitizenDashboard() {
     fetchAllDataAndPredict();
     const interval = setInterval(fetchAllDataAndPredict, REFRESH_INTERVAL);
     return () => clearInterval(interval);
-    
   }, [user.area]);
 
-  // ========== ROUTING LOGIC ==========
   const handleFindRoute = async () => {
     if (!userLocation) {
       alert("Please enable GPS to find a route.");
@@ -610,6 +931,7 @@ function CitizenDashboard() {
     setNearestHospital(null);
     setFloodWarnings([]);
     setAlternateHospitals([]);
+    setPathDetails(null);
 
     try {
       const hospitals = await fetchNearbyHospitals(userLocation.lat, userLocation.lon, 15000);
@@ -643,6 +965,20 @@ function CitizenDashboard() {
         );
 
         if (path) {
+          await buildGraphFromRoute(path, user.province, userLocation, hospitalsWithDistance);
+
+          // Use A* or Dijkstra based on toggle
+          const pathResult = useAStar 
+            ? roadNetwork.findShortestPathAStar('user', `hospital_${hospital.id}`, true)
+            : roadNetwork.findShortestPathDijkstra('user', `hospital_${hospital.id}`, true);
+
+          if (pathResult) {
+            const details = roadNetwork.getPathDetails(pathResult.path);
+            setPathDetails(details);
+            
+            console.log(`📊 Path Analysis:`, details);
+          }
+
           if (tempWarnings.length === 0) {
             safeRouteFound = true;
             selectedHospital = hospital;
@@ -685,7 +1021,6 @@ function CitizenDashboard() {
   const uiSeverity = mapSeverityToUI(mlResult);
   const SeverityIcon = uiSeverity.icon;
 
-  // ========== RENDER STATES ==========
   if (loading && !features) {
     return (
       <div className="p-6 flex items-center justify-center min-h-screen">
@@ -734,14 +1069,17 @@ function CitizenDashboard() {
               <span>Last updated: {lastUpdated.toLocaleString()}</span>
             </div>
           )}
-          {/* Cache Stats */}
+          {/* Stats */}
           <div className="flex items-center gap-4 text-xs text-gray-500 mt-2">
             <span>🗄️ Cache: {cacheStats.hospitals} hospitals | {cacheStats.routes} routes</span>
+            {graphStats && (
+              <span>📊 Graph: {graphStats.nodes} nodes | {graphStats.edges} edges | {graphStats.highRiskEdges} high-risk</span>
+            )}
           </div>
+          
         </div>
 
         <div className="flex gap-2">
-          {/* Emergency SOS Button */}
           <button
             onClick={() => setShowSOSModal(true)}
             className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-white flex items-center gap-2 transition-colors animate-pulse"
@@ -809,7 +1147,7 @@ function CitizenDashboard() {
           <div className="flex justify-between items-center mb-3">
             <h2 className="text-xl font-bold flex items-center gap-2">
               <Navigation className="h-5 w-5 text-blue-400" />
-              Live Evacuation Map
+              Live Evacuation Map 
             </h2>
             <button
               onClick={handleFindRoute}
@@ -823,6 +1161,39 @@ function CitizenDashboard() {
             </button>
           </div>
 
+          {/* Path Details */}
+          {pathDetails && (
+            <div className="mb-4 bg-slate-800 rounded-lg p-4">
+              <h3 className="font-bold mb-2 text-cyan-400">📊 Path Analysis</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div>
+                  <span className="text-gray-400">Distance:</span>
+                  <p className="font-bold">{pathDetails.totalDistance.toFixed(2)} km</p>
+                </div>
+                <div>
+                  <span className="text-gray-400">Avg Risk:</span>
+                  <p className={`font-bold ${
+                    pathDetails.averageRisk > 0.5 ? 'text-red-400' : 
+                    pathDetails.averageRisk > 0.3 ? 'text-orange-400' : 
+                    'text-green-400'
+                  }`}>
+                    {(pathDetails.averageRisk * 100).toFixed(0)}%
+                  </p>
+                </div>
+                <div>
+                  <span className="text-gray-400">Waypoints:</span>
+                  <p className="font-bold">{pathDetails.waypoints}</p>
+                </div>
+                <div>
+                  <span className="text-gray-400">High-Risk Segments:</span>
+                  <p className={`font-bold ${pathDetails.highRiskSegments > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {pathDetails.highRiskSegments}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="relative z-10 w-full h-[400px] overflow-hidden rounded-lg shadow-lg">
             <MapContainer
               center={[coords.lat, coords.lon]}
@@ -835,14 +1206,12 @@ function CitizenDashboard() {
                 attribution="&copy; OpenStreetMap contributors"
               />
 
-              {/* User Live GPS */}
               {userLocation && (
                 <Marker position={[userLocation.lat, userLocation.lon]} icon={userIcon}>
                   <Popup>Your Location</Popup>
                 </Marker>
               )}
 
-              {/* Nearest Hospital */}
               {nearestHospital && (
                 <Marker position={[nearestHospital.lat, nearestHospital.lon]} icon={hospitalIcon}>
                   <Popup>
@@ -861,7 +1230,6 @@ function CitizenDashboard() {
                 </Marker>
               )}
 
-              {/* Route */}
               {routePath && (
                 <>
                   <Polyline
@@ -871,7 +1239,6 @@ function CitizenDashboard() {
                   />
                   <MapReCenter bounds={routePath} />
 
-                  {/* Mark flood zones on route */}
                   {floodWarnings.map((warning, idx) => (
                     <Circle
                       key={idx}
@@ -895,7 +1262,6 @@ function CitizenDashboard() {
                 </>
               )}
 
-              {/* Flood Risk Zone - Main Area */}
               <Circle
                 center={[coords.lat, coords.lon]}
                 radius={5000}
@@ -914,7 +1280,6 @@ function CitizenDashboard() {
             </MapContainer>
           </div>
 
-          {/* Flood Warnings Section */}
           {floodWarnings.length > 0 && (
             <div className="mt-4 bg-red-900/30 border border-red-500 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
@@ -948,7 +1313,6 @@ function CitizenDashboard() {
             </div>
           )}
 
-          {/* Safe Route Confirmation */}
           {routePath && floodWarnings.length === 0 && (
             <div className="mt-4 bg-green-900/30 border border-green-500 rounded-lg p-4">
               <div className="flex items-center gap-2">
@@ -1003,7 +1367,6 @@ function CitizenDashboard() {
         </div>
       )}
 
-      {/* Contributing Factors */}
       {explain && explain.length > 0 && (
         <div className="bg-slate-800 p-5 rounded-lg mb-6">
           <h3 className="font-bold mb-3 flex items-center gap-2">
@@ -1020,7 +1383,6 @@ function CitizenDashboard() {
         </div>
       )}
 
-      {/* SOS Modal Component */}
       <SOSRequestModal
         isOpen={showSOSModal}
         onClose={() => setShowSOSModal(false)}
