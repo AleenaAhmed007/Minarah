@@ -263,8 +263,6 @@ class RoadNetworkGraph {
     return null;
   }
 
-
-
   // ========== RECONSTRUCT PATH ==========
   reconstructPath(cameFrom, current, scores) {
     const path = [];
@@ -500,9 +498,67 @@ class HospitalHashMap {
   }
 }
 
+// ========== FLOOD RISK CACHE ==========
+class FloodRiskCache {
+  constructor(ttl = 30 * 60 * 1000) {
+    this.cache = new Map();
+    this.ttl = ttl;
+  }
+
+  generateKey(lat, lon) {
+    const roundedLat = Math.round(lat * 100) / 100;
+    const roundedLon = Math.round(lon * 100) / 100;
+    return `${roundedLat},${roundedLon}`;
+  }
+
+  set(lat, lon, floodData) {
+    const key = this.generateKey(lat, lon);
+    console.log(`%c🌊 FLOOD CACHE - SET`, 'color: #06b6d4; font-weight: bold');
+    console.log(`   Key: ${key}`);
+    console.log(`   Flood: ${floodData?.flood ? 'YES' : 'NO'}`);
+    console.log(`   Severity: ${floodData?.severity || 'N/A'}`);
+    this.cache.set(key, {
+      data: floodData,
+      timestamp: Date.now(),
+    });
+  }
+
+  get(lat, lon) {
+    const key = this.generateKey(lat, lon);
+    const cached = this.cache.get(key);
+    
+    if (!cached) {
+      console.log(`%c🌊 FLOOD CACHE - MISS`, 'color: #ef4444; font-weight: bold');
+      console.log(`   Key: ${key}`);
+      return null;
+    }
+    
+    if (Date.now() - cached.timestamp > this.ttl) {
+      console.log(`%c🌊 FLOOD CACHE - EXPIRED`, 'color: #f59e0b; font-weight: bold');
+      console.log(`   Key: ${key}`);
+      this.cache.delete(key);
+      return null;
+    }
+    
+    console.log(`%c🌊 FLOOD CACHE - HIT`, 'color: #10b981; font-weight: bold');
+    console.log(`   Key: ${key}`);
+    console.log(`   Age: ${Math.floor((Date.now() - cached.timestamp) / 1000)}s`);
+    return cached.data;
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+
+  size() {
+    return this.cache.size;
+  }
+}
+
 // ========== GLOBAL CACHE INSTANCES ==========
 const hospitalCache = new HospitalHashMap();
 const routeCache = new LRUCache(50);
+const floodRiskCache = new FloodRiskCache();
 
 // ========== CONSTANTS ==========
 const PROVINCE_THRESHOLDS = {
@@ -656,7 +712,13 @@ const calculateDistance = (lat1, lon1, lat2, lon2) => {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
+// ========== OPTIMIZED FLOOD RISK CHECKING ==========
 const checkFloodRisk = async (lat, lon, province) => {
+  const cached = floodRiskCache.get(lat, lon);
+  if (cached) {
+    return cached;
+  }
+
   try {
     const weather = await fetchWeatherData(lat, lon);
     const ndvi = await fetchNDVI(lat, lon);
@@ -673,6 +735,9 @@ const checkFloodRisk = async (lat, lon, province) => {
     };
 
     const resp = await apiService.getFloodPrediction(payload);
+    
+    floodRiskCache.set(lat, lon, resp.data);
+    
     return resp.data;
   } catch (e) {
     console.error("Flood check error:", e);
@@ -680,7 +745,36 @@ const checkFloodRisk = async (lat, lon, province) => {
   }
 };
 
-const sampleRoutePoints = (routeCoords, numSamples = 15) => {
+// ========== BATCH FLOOD RISK CHECKING (PARALLEL) ==========
+const checkFloodRiskBatch = async (points, province) => {
+  console.log(`%c🚀 PARALLEL FLOOD CHECKS`, 'color: #3b82f6; font-weight: bold; font-size: 14px');
+  console.log(`   Points to check: ${points.length}`);
+  console.log(`   Starting parallel processing...`);
+  
+  const startTime = Date.now();
+  
+  const promises = points.map(point => 
+    checkFloodRisk(point[0], point[1], province).catch(err => {
+      console.warn(`Failed to check point ${point[0]}, ${point[1]}:`, err);
+      return null;
+    })
+  );
+  
+  const results = await Promise.all(promises);
+  
+  const elapsed = Date.now() - startTime;
+  console.log(`%c✅ PARALLEL CHECKS COMPLETE`, 'color: #10b981; font-weight: bold');
+  console.log(`   Time: ${elapsed}ms`);
+  console.log(`   Speed: ${(points.length / (elapsed / 1000)).toFixed(1)} checks/second`);
+  
+  return results.map((result, index) => ({
+    lat: points[index][0],
+    lon: points[index][1],
+    floodData: result
+  }));
+};
+
+const sampleRoutePoints = (routeCoords, numSamples = 8) => {
   if (routeCoords.length <= numSamples) return routeCoords;
 
   const samples = [];
@@ -690,7 +784,6 @@ const sampleRoutePoints = (routeCoords, numSamples = 15) => {
     samples.push(routeCoords[i * step]);
   }
 
-  // Always include start, middle, and end points
   if (!samples.some(p => p[0] === routeCoords[0][0])) {
     samples.unshift(routeCoords[0]);
   }
@@ -701,15 +794,12 @@ const sampleRoutePoints = (routeCoords, numSamples = 15) => {
   return samples;
 };
 
-// ========== BUILD GRAPH FROM ROUTE DATA ==========
+// ========== OPTIMIZED GRAPH BUILDING (PARALLEL FLOOD CHECKS) ==========
 const buildGraphFromRoute = async (routePath, province, userLocation, hospitals) => {
   console.log(`%c🔨 GRAPH CONSTRUCTION - START`, 'color: #14b8a6; font-weight: bold; font-size: 14px');
-  console.log(`   Route Points: ${routePath.length}`);
-  console.log(`   Hospitals: ${hospitals.length}`);
-  console.log(`   Province: ${province}`);
+  const startTime = Date.now();
   
   roadNetwork.clear();
-  console.log(`   Cleared existing graph`);
 
   roadNetwork.addNode('user', userLocation.lat, userLocation.lon, 'intersection');
 
@@ -717,28 +807,30 @@ const buildGraphFromRoute = async (routePath, province, userLocation, hospitals)
     roadNetwork.addNode(`hospital_${hospital.id}`, hospital.lat, hospital.lon, 'hospital');
   });
 
-  const samples = sampleRoutePoints(routePath, 10);
-  console.log(`%c📍 WAYPOINT SAMPLING`, 'color: #a855f7; font-weight: bold');
-  console.log(`   Original Points: ${routePath.length}`);
-  console.log(`   Sampled Waypoints: ${samples.length}`);
+  const samples = sampleRoutePoints(routePath, 8);
+  console.log(`   Sampled ${samples.length} waypoints from ${routePath.length} route points`);
   
   for (let i = 0; i < samples.length; i++) {
     const nodeId = `intersection_${i}`;
     roadNetwork.addNode(nodeId, samples[i][0], samples[i][1], 'intersection');
+  }
 
-    if (i > 0) {
-      const prevNodeId = i === 1 ? 'user' : `intersection_${i - 1}`;
-      const distance = calculateDistance(
-        samples[i - 1][0], samples[i - 1][1],
-        samples[i][0], samples[i][1]
-      );
+  const floodResults = await checkFloodRiskBatch(samples, province);
+  
+  for (let i = 1; i < samples.length; i++) {
+    const prevNodeId = i === 1 ? 'user' : `intersection_${i - 1}`;
+    const nodeId = `intersection_${i}`;
+    
+    const distance = calculateDistance(
+      samples[i - 1][0], samples[i - 1][1],
+      samples[i][0], samples[i][1]
+    );
 
-      const floodData = await checkFloodRisk(samples[i][0], samples[i][1], province);
-      const floodRisk = floodData && floodData.flood ? 
-        (floodData.severity === 'severe' ? 1.0 : floodData.severity === 'moderate' ? 0.6 : 0.3) : 0;
+    const floodData = floodResults[i].floodData;
+    const floodRisk = floodData && floodData.flood ? 
+      (floodData.severity === 'severe' ? 1.0 : floodData.severity === 'moderate' ? 0.6 : 0.3) : 0;
 
-      roadNetwork.addEdge(prevNodeId, nodeId, distance, floodRisk);
-    }
+    roadNetwork.addEdge(prevNodeId, nodeId, distance, floodRisk);
   }
 
   if (samples.length > 0 && hospitals.length > 0) {
@@ -751,21 +843,16 @@ const buildGraphFromRoute = async (routePath, province, userLocation, hospitals)
     roadNetwork.addEdge(lastIntersection, `hospital_${nearestHospital.id}`, distance, 0);
   }
 
+  const elapsed = Date.now() - startTime;
   const stats = roadNetwork.getStats();
   console.log(`%c✅ GRAPH CONSTRUCTION - COMPLETE`, 'color: #10b981; font-weight: bold; font-size: 14px');
-  console.log(`   Total Nodes: ${stats.nodes}`);
-  console.log(`   Total Edges: ${stats.edges}`);
-  console.log(`   High-Risk Edges: ${stats.highRiskEdges}`);
-  console.log(`   Intersections: ${stats.intersections}`);
-  console.log(`   Hospitals: ${stats.hospitals}`);
+  console.log(`   Time: ${elapsed}ms`);
+  console.log(`   Nodes: ${stats.nodes} | Edges: ${stats.edges}`);
 };
 
+// ========== OPTIMIZED ROUTE FETCHING ==========
 const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFloodZones = []) => {
   console.log(`%c🗺️ ROUTING - START`, 'color: #ec4899; font-weight: bold; font-size: 14px');
-  console.log(`   From: [${start.lat.toFixed(4)}, ${start.lon.toFixed(4)}]`);
-  console.log(`   To: [${end.lat.toFixed(4)}, ${end.lon.toFixed(4)}]`);
-  console.log(`   Province: ${province}`);
-  console.log(`   Avoiding Flood Zones: ${avoidFloodZones.length}`);
   
   if (!ORS_API_KEY) {
     console.error("❌ Missing ORS_API_KEY");
@@ -776,34 +863,28 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
   
   const cachedRoute = routeCache.get(cacheKey);
   if (cachedRoute) {
-    console.log("🎯 Using cached route data");
     if (setFloodWarnings && cachedRoute.floodWarnings) {
       setFloodWarnings(cachedRoute.floodWarnings);
     }
     return cachedRoute.routePath;
   }
 
-  console.log("🔍 Fetching route from OpenRouteService...");
-
   try {
-    // Build request body with avoid_polygons if we have flood zones
     let requestBody = {
       coordinates: [[start.lon, start.lat], [end.lon, end.lat]]
     };
     
-    // Add avoid_polygons for flood zones
     if (avoidFloodZones && avoidFloodZones.length > 0) {
       const avoidPolygons = {
         type: "MultiPolygon",
         coordinates: avoidFloodZones.map(zone => {
-          // Create a polygon around each flood point (square buffer)
-          const offset = 0.008; // ~800m offset
+          const offset = 0.008;
           return [[
             [zone.lon - offset, zone.lat - offset],
             [zone.lon + offset, zone.lat - offset],
             [zone.lon + offset, zone.lat + offset],
             [zone.lon - offset, zone.lat + offset],
-            [zone.lon - offset, zone.lat - offset] // Close the polygon
+            [zone.lon - offset, zone.lat - offset]
           ]];
         })
       };
@@ -829,38 +910,22 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
     if (data.features[0].geometry.coordinates) {
       const routePath = data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
 
-      const samplePoints = sampleRoutePoints(routePath, 5);
-      const floodChecks = [];
-
+      const samplePoints = sampleRoutePoints(routePath, 3);
+      
       console.log(`%c🔍 FLOOD RISK ANALYSIS`, 'color: #3b82f6; font-weight: bold; font-size: 14px');
-      console.log(`   Total Route Points: ${routePath.length}`);
-      console.log(`   Sample Points: ${samplePoints.length}`);
-      console.log(`   Starting flood detection...`);
 
-      for (const point of samplePoints) {
-        const floodData = await checkFloodRisk(point[0], point[1], province);
-        if (floodData && floodData.flood) {
-          console.log(`%c⚠️ FLOOD DETECTED!`, 'color: #ef4444; font-weight: bold');
-          console.log(`   Location: [${point[0].toFixed(4)}, ${point[1].toFixed(4)}]`);
-          console.log(`   Severity: ${floodData.severity.toUpperCase()}`);
-          console.log(`   Confidence: ${(floodData.confidence * 100).toFixed(0)}%`);
-          floodChecks.push({
-            lat: point[0],
-            lon: point[1],
-            severity: floodData.severity,
-            confidence: floodData.confidence
-          });
-        }
-      }
+      const floodResults = await checkFloodRiskBatch(samplePoints, province);
+      const floodChecks = floodResults
+        .filter(result => result.floodData && result.floodData.flood)
+        .map(result => ({
+          lat: result.lat,
+          lon: result.lon,
+          severity: result.floodData.severity,
+          confidence: result.floodData.confidence
+        }));
 
       if (setFloodWarnings && floodChecks.length > 0) {
-        console.log(`%c⚠️ FLOOD SUMMARY`, 'color: #f59e0b; font-weight: bold; font-size: 14px');
-        console.log(`   Total Flood Zones: ${floodChecks.length}`);
-        console.log(`   Route Status: DANGEROUS`);
         setFloodWarnings(floodChecks);
-      } else {
-        console.log(`%c✅ ROUTE SAFE`, 'color: #10b981; font-weight: bold; font-size: 14px');
-        console.log(`   No flood zones detected on this route`);
       }
 
       routeCache.set(cacheKey, {
@@ -868,7 +933,6 @@ const getOptimizedRoute = async (start, end, province, setFloodWarnings, avoidFl
         floodWarnings: floodChecks,
         timestamp: Date.now(),
       });
-      console.log("✅ Route cached in LRU");
 
       return routePath;
     }
@@ -955,8 +1019,9 @@ function CitizenDashboard() {
   const [floodWarnings, setFloodWarnings] = useState([]);
   const [alternateHospitals, setAlternateHospitals] = useState([]);
   const [pathDetails, setPathDetails] = useState(null);
+  const [routingTime, setRoutingTime] = useState(null);
 
-  const [cacheStats, setCacheStats] = useState({ hospitals: 0, routes: 0 });
+  const [cacheStats, setCacheStats] = useState({ hospitals: 0, routes: 0, floodRisk: 0 });
   const [graphStats, setGraphStats] = useState(null);
   const [dummyMode, setDummyMode] = useState(false);
 
@@ -974,6 +1039,7 @@ function CitizenDashboard() {
       setCacheStats({
         hospitals: hospitalCache.map.size,
         routes: routeCache.size(),
+        floodRisk: floodRiskCache.size(),
       });
       setGraphStats(roadNetwork.getStats());
     };
@@ -1093,17 +1159,13 @@ function CitizenDashboard() {
     console.log(`%c🚀 ROUTE CALCULATION INITIATED`, 'color: #ec4899; font-weight: bold; font-size: 18px');
     console.log(`%c━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, 'color: #ec4899; font-weight: bold');
     
+    const startTime = Date.now();
+    
     if (!userLocation) {
       console.log(`%c❌ ERROR: GPS location not available`, 'color: #ef4444; font-weight: bold');
       alert("Please enable GPS to find a route.");
       return;
     }
-    
-    console.log(`%c📍 USER LOCATION`, 'color: #3b82f6; font-weight: bold');
-    console.log(`   Latitude: ${userLocation.lat.toFixed(6)}`);
-    console.log(`   Longitude: ${userLocation.lon.toFixed(6)}`);
-    console.log(`   Province: ${user.province}`);
-    console.log(`   ─────────────────────────────────────────`);
     
     setRoutingLoading(true);
     setRoutePath(null);
@@ -1111,38 +1173,25 @@ function CitizenDashboard() {
     setFloodWarnings([]);
     setAlternateHospitals([]);
     setPathDetails(null);
+    setRoutingTime(null);
 
     try {
-      console.log(`%c🔍 SEARCHING FOR NEARBY HOSPITALS`, 'color: #06b6d4; font-weight: bold; font-size: 14px');
-      console.log(`   Search Radius: 15 km`);
       const hospitals = await fetchNearbyHospitals(userLocation.lat, userLocation.lon, 15000);
 
       if (hospitals.length === 0) {
-        console.log(`%c❌ NO HOSPITALS FOUND`, 'color: #ef4444; font-weight: bold; font-size: 14px');
-        console.log(`   Search radius: 15 km`);
         alert("No hospitals found nearby (15km).");
         setRoutingLoading(false);
         return;
       }
-
-      console.log(`%c✅ HOSPITALS FOUND: ${hospitals.length}`, 'color: #10b981; font-weight: bold; font-size: 14px');
 
       const hospitalsWithDistance = hospitals.map((h) => ({
         ...h,
         distance: calculateDistance(userLocation.lat, userLocation.lon, h.lat, h.lon)
       })).sort((a, b) => a.distance - b.distance);
 
-      console.log(`%c📋 TOP 5 NEAREST HOSPITALS`, 'color: #8b5cf6; font-weight: bold');
-      hospitalsWithDistance.slice(0, 5).forEach((h, idx) => {
-        console.log(`   ${idx + 1}. ${h.name} - ${h.distance.toFixed(1)} km`);
-      });
-      console.log(`   ─────────────────────────────────────────`);
-
       // DUMMY MODE SPECIAL HANDLING
       if (dummyMode && DUMMY_FLOOD_DATA.floodedRoute) {
         console.log(`%c🧪 DUMMY MODE ACTIVATED`, 'color: #a855f7; font-weight: bold; font-size: 16px');
-        console.log(`   Injecting simulated flood data...`);
-        console.log(`   Flood Zones: ${DUMMY_FLOOD_DATA.routeWarnings.length}`);
         
         const selectedHospital = hospitalsWithDistance[0];
         const dummyPath = [
@@ -1159,16 +1208,6 @@ function CitizenDashboard() {
           [safeHospital.lat, safeHospital.lon]
         ];
         
-        console.log(`%c⚠️ SIMULATED FLOODED ROUTE`, 'color: #ef4444; font-weight: bold');
-        console.log(`   Hospital: ${selectedHospital.name}`);
-        console.log(`   Distance: ${selectedHospital.distance.toFixed(1)} km`);
-        console.log(`   Flood Zones: ${DUMMY_FLOOD_DATA.routeWarnings.length}`);
-        
-        console.log(`%c✅ SIMULATED SAFE ALTERNATE`, 'color: #10b981; font-weight: bold');
-        console.log(`   Hospital: ${safeHospital.name}`);
-        console.log(`   Distance: ${safeHospital.distance.toFixed(1)} km`);
-        console.log(`   Flood Zones: 0`);
-        
         setNearestHospital(selectedHospital);
         setRoutePath(dummyPath);
         setFloodWarnings(DUMMY_FLOOD_DATA.routeWarnings);
@@ -1180,7 +1219,6 @@ function CitizenDashboard() {
         }));
         setAlternateHospitals(alternates);
         
-        // Simulate path details
         setPathDetails({
           totalDistance: 5.2,
           averageRisk: 0.68,
@@ -1189,92 +1227,75 @@ function CitizenDashboard() {
           segments: []
         });
         
-        console.log(`%c🧪 DUMMY MODE COMPLETE`, 'color: #a855f7; font-weight: bold; font-size: 14px');
-        console.log(`   Simulated scenario displayed successfully`);
+        const elapsed = Date.now() - startTime;
+        setRoutingTime(elapsed);
         
-        alert(`⚠️ [DUMMY MODE] WARNING: Flood risk detected on route to ${selectedHospital.name}!\n\n` +
-          `${DUMMY_FLOOD_DATA.routeWarnings.length} flood zone(s) detected along the path.\n` +
-          `🟢 SAFE ALTERNATE ROUTE displayed to ${safeHospital.name} (green line)`);
+        alert(`⚠️ [DUMMY MODE] WARNING: Flood risk detected!\n\nRoute calculated in ${elapsed}ms\n${DUMMY_FLOOD_DATA.routeWarnings.length} flood zone(s) detected.`);
         setRoutingLoading(false);
         return;
       }
 
-      // REAL MODE PROCESSING
+      // REAL MODE - OPTIMIZED PROCESSING
       console.log(`%c🏥 HOSPITAL ROUTE ANALYSIS - START`, 'color: #ec4899; font-weight: bold; font-size: 16px');
-      console.log(`   User Location: [${userLocation.lat.toFixed(4)}, ${userLocation.lon.toFixed(4)}]`);
-      console.log(`   Hospitals to Check: ${Math.min(5, hospitalsWithDistance.length)}`);
-      console.log(`   =====================================`);
-      const routeResults = [];
       
-      // First pass: Get initial routes and detect flood zones
+      const routeResults = [];
       const initialFloodZones = [];
       
-      for (let i = 0; i < Math.min(5, hospitalsWithDistance.length); i++) {
-        const hospital = hospitalsWithDistance[i];
-        console.log(`%c🏥 Hospital ${i + 1}: ${hospital.name}`, 'color: #06b6d4; font-weight: bold');
-        console.log(`   Distance: ${hospital.distance.toFixed(1)} km`);
-
+      // Check up to 3 hospitals in parallel
+      const hospitalsToCheck = hospitalsWithDistance.slice(0, 3);
+      console.log(`%c🚀 PARALLEL HOSPITAL ROUTING`, 'color: #8b5cf6; font-weight: bold; font-size: 14px');
+      console.log(`   Checking ${hospitalsToCheck.length} hospitals simultaneously...`);
+      
+      const routePromises = hospitalsToCheck.map(async (hospital) => {
         const tempWarnings = [];
         const path = await getOptimizedRoute(
           userLocation,
           hospital,
           user.province,
           (warnings) => tempWarnings.push(...warnings),
-          [] // No avoidance zones on first pass
+          []
         );
 
         if (path) {
-          // Build graph for this route
           await buildGraphFromRoute(path, user.province, userLocation, hospitalsWithDistance);
-
-          // Use A* algorithm
           const pathResult = roadNetwork.findShortestPathAStar('user', `hospital_${hospital.id}`, true);
 
           if (pathResult) {
             const details = roadNetwork.getPathDetails(pathResult.path);
-            console.log(`%c📊 PATH ANALYSIS`, 'color: #a855f7; font-weight: bold');
-            console.log(`   Total Distance: ${details.totalDistance.toFixed(2)} km`);
-            console.log(`   Average Risk: ${(details.averageRisk * 100).toFixed(0)}%`);
-            console.log(`   High-Risk Segments: ${details.highRiskSegments}`);
-            console.log(`   Waypoints: ${details.waypoints}`);
+            console.log(`   ${hospital.name}: ${details.totalDistance.toFixed(2)}km, Risk: ${(details.averageRisk * 100).toFixed(0)}%`);
           }
 
-          routeResults.push({
+          const highRiskZones = tempWarnings.filter(w => 
+            w.severity && ['severe', 'high', 'critical'].includes(w.severity.toLowerCase())
+          );
+          
+          return {
             hospital,
             path,
             warnings: tempWarnings,
             isSafe: tempWarnings.length === 0,
-            riskScore: tempWarnings.length
-          });
-          
-          // ONLY collect HIGH-RISK flood zones (severe/high severity) for avoidance
-          if (tempWarnings.length > 0) {
-            const highRiskZones = tempWarnings.filter(w => 
-              w.severity && ['severe', 'high', 'critical'].includes(w.severity.toLowerCase())
-            );
-            initialFloodZones.push(...highRiskZones);
-            console.log(`   ⚠️ Flood Zones: ${tempWarnings.length} (${highRiskZones.length} high-risk)`);
-          } else {
-            console.log(`   ✅ Flood Zones: 0 (SAFE ROUTE)`);
-          }
-          console.log(`   =====================================`);
+            riskScore: tempWarnings.length,
+            highRiskZones
+          };
         }
-      }
+        return null;
+      });
+
+      const results = await Promise.all(routePromises);
+      routeResults.push(...results.filter(r => r !== null));
+
+      results.forEach(result => {
+        if (result && result.highRiskZones) {
+          initialFloodZones.push(...result.highRiskZones);
+        }
+      });
 
       if (routeResults.length === 0) {
-        console.log(`%c❌ ROUTING FAILED`, 'color: #ef4444; font-weight: bold; font-size: 14px');
-        console.log(`   No routes could be calculated`);
         alert("Could not calculate any driving routes (ORS API error).");
         setRoutingLoading(false);
         return;
       }
 
-      console.log(`%c📊 ROUTE COMPARISON`, 'color: #8b5cf6; font-weight: bold; font-size: 14px');
-      console.log(`   Total Routes Analyzed: ${routeResults.length}`);
-      console.log(`   Safe Routes: ${routeResults.filter(r => r.isSafe).length}`);
-      console.log(`   Dangerous Routes: ${routeResults.filter(r => !r.isSafe).length}`);
-
-      // Sort by safety first
       routeResults.sort((a, b) => {
         if (a.isSafe && !b.isSafe) return -1;
         if (!a.isSafe && b.isSafe) return 1;
@@ -1283,17 +1304,10 @@ function CitizenDashboard() {
       });
 
       const primaryRoute = routeResults[0];
-      console.log(`%c🎯 PRIMARY ROUTE SELECTED`, 'color: #3b82f6; font-weight: bold; font-size: 14px');
-      console.log(`   Hospital: ${primaryRoute.hospital.name}`);
-      console.log(`   Distance: ${primaryRoute.hospital.distance.toFixed(1)} km`);
-      console.log(`   Safety Status: ${primaryRoute.isSafe ? 'SAFE ✅' : 'DANGEROUS ⚠️'}`);
-      console.log(`   Flood Zones: ${primaryRoute.warnings.length}`);
       
-      // If primary route has HIGH-RISK floods, try to reroute avoiding them
+      // Try reroute if primary has high-risk floods
       if (!primaryRoute.isSafe && initialFloodZones.length > 0) {
         console.log(`%c🔄 ATTEMPTING REROUTE`, 'color: #f59e0b; font-weight: bold; font-size: 14px');
-        console.log(`   Reason: High-risk floods detected`);
-        console.log(`   Avoiding ${initialFloodZones.length} danger zones...`);
         
         const rerouteWarnings = [];
         const reroutePath = await getOptimizedRoute(
@@ -1301,34 +1315,23 @@ function CitizenDashboard() {
           primaryRoute.hospital,
           user.province,
           (warnings) => rerouteWarnings.push(...warnings),
-          initialFloodZones // Avoid ONLY high-risk flood zones
+          initialFloodZones
         );
         
         if (reroutePath && rerouteWarnings.length < primaryRoute.warnings.length) {
           console.log(`%c✅ REROUTE SUCCESSFUL!`, 'color: #10b981; font-weight: bold; font-size: 14px');
-          console.log(`   Flood Zones Reduced: ${primaryRoute.warnings.length} → ${rerouteWarnings.length}`);
           primaryRoute.path = reroutePath;
           primaryRoute.warnings = rerouteWarnings;
           primaryRoute.isSafe = rerouteWarnings.length === 0;
           primaryRoute.riskScore = rerouteWarnings.length;
-        } else if (reroutePath) {
-          console.log(`%c⚠️ REROUTE ATTEMPTED`, 'color: #f59e0b; font-weight: bold');
-          console.log(`   Status: Similar risk level maintained`);
         }
       }
 
-      console.log(`%c🔨 FINAL GRAPH CONSTRUCTION`, 'color: #14b8a6; font-weight: bold; font-size: 14px');
-      // Build final graph and get path details
       await buildGraphFromRoute(primaryRoute.path, user.province, userLocation, hospitalsWithDistance);
       const pathResult = roadNetwork.findShortestPathAStar('user', `hospital_${primaryRoute.hospital.id}`, true);
 
       if (pathResult) {
         const details = roadNetwork.getPathDetails(pathResult.path);
-        console.log(`%c📈 FINAL PATH STATISTICS`, 'color: #a855f7; font-weight: bold; font-size: 14px');
-        console.log(`   Total Distance: ${details.totalDistance.toFixed(2)} km`);
-        console.log(`   Average Risk: ${(details.averageRisk * 100).toFixed(1)}%`);
-        console.log(`   High-Risk Segments: ${details.highRiskSegments}`);
-        console.log(`   Total Waypoints: ${details.waypoints}`);
         setPathDetails(details);
       }
 
@@ -1336,7 +1339,7 @@ function CitizenDashboard() {
       setRoutePath(primaryRoute.path);
       setFloodWarnings(primaryRoute.warnings);
 
-      const alternates = routeResults.slice(1, 4).map(r => ({
+      const alternates = routeResults.slice(1).map(r => ({
         ...r.hospital,
         routePath: r.path,
         floodWarnings: r.warnings,
@@ -1345,42 +1348,22 @@ function CitizenDashboard() {
       }));
       setAlternateHospitals(alternates);
 
-      console.log(`%c🏁 ROUTING COMPLETE - SUMMARY`, 'color: #10b981; font-weight: bold; font-size: 16px');
-      console.log(`   ═══════════════════════════════════════`);
-      console.log(`   PRIMARY ROUTE:`);
-      console.log(`     → ${primaryRoute.hospital.name}`);
-      console.log(`     → Distance: ${primaryRoute.hospital.distance.toFixed(1)} km`);
-      console.log(`     → Status: ${primaryRoute.isSafe ? '✅ SAFE' : '⚠️ DANGEROUS'}`);
-      console.log(`     → Flood Zones: ${primaryRoute.warnings.length}`);
-      console.log(`   ───────────────────────────────────────`);
-      console.log(`   ALTERNATE ROUTES: ${alternates.length}`);
-      alternates.forEach((alt, idx) => {
-        console.log(`     ${idx + 1}. ${alt.name} - ${alt.distance.toFixed(1)} km (${alt.isSafe ? '✅' : '⚠️ ' + alt.riskScore + ' floods'})`);
-      });
-      console.log(`   ═══════════════════════════════════════`);
+      const elapsed = Date.now() - startTime;
+      setRoutingTime(elapsed);
 
       if (primaryRoute.isSafe) {
         const floodedCount = routeResults.filter(r => !r.isSafe).length;
         if (floodedCount > 0) {
-          alert(`✅ SAFEST ROUTE FOUND: ${primaryRoute.hospital.name} (${primaryRoute.hospital.distance.toFixed(1)}km)\n\n` +
-            `Route automatically avoids all flood zones!\n` +
-            `⚠️ ${floodedCount} other route(s) have flood risks.`);
+          alert(`✅ SAFEST ROUTE FOUND in ${elapsed}ms!\n\n${primaryRoute.hospital.name} (${primaryRoute.hospital.distance.toFixed(1)}km)\n\nRoute avoids all flood zones!`);
         } else {
-          alert(`✅ Safe route to ${primaryRoute.hospital.name} (${primaryRoute.hospital.distance.toFixed(1)}km)\n\nNo flood zones detected.`);
+          alert(`✅ Safe route found in ${elapsed}ms\n\n${primaryRoute.hospital.name} (${primaryRoute.hospital.distance.toFixed(1)}km)`);
         }
       } else {
         const safeAlternates = alternates.filter(a => a.isSafe);
         if (safeAlternates.length > 0) {
-          alert(`⚠️ NEAREST HOSPITAL: ${primaryRoute.hospital.name}\n\n` +
-            `Route still has ${primaryRoute.warnings.length} flood zone(s) (shown in RED).\n` +
-            `Unable to completely avoid flooding on this route.\n\n` +
-            `🟢 ${safeAlternates.length} SAFER ALTERNATE(S) available:\n` +
-            safeAlternates.map(a => `  • ${a.name} (${a.distance.toFixed(1)}km)`).join('\n'));
+          alert(`⚠️ Route calculated in ${elapsed}ms\n\nNearest: ${primaryRoute.hospital.name} has ${primaryRoute.warnings.length} flood zone(s)\n\n✅ ${safeAlternates.length} safer alternate(s) available!`);
         } else {
-          alert(`⚠️ ALL ROUTES HAVE FLOOD RISK!\n\n` +
-            `Best route: ${primaryRoute.hospital.name} (${primaryRoute.warnings.length} flood zones)\n` +
-            `System attempted automatic rerouting but flooding is widespread.\n\n` +
-            `⚠️ RECOMMENDATION: Wait for conditions to improve or seek immediate shelter.`);
+          alert(`⚠️ ALL ROUTES HAVE FLOOD RISK (${elapsed}ms)\n\nBest: ${primaryRoute.hospital.name} (${primaryRoute.warnings.length} zones)\n\n⚠️ Consider waiting for better conditions.`);
         }
       }
     } catch (e) {
@@ -1445,9 +1428,12 @@ function CitizenDashboard() {
           
           {/* Stats */}
           <div className="flex items-center gap-4 text-xs text-gray-500 mt-2">
-            <span>🗄️ Cache: {cacheStats.hospitals} hospitals | {cacheStats.routes} routes</span>
+            <span>🗄️ Cache: {cacheStats.hospitals} hospitals | {cacheStats.routes} routes | {cacheStats.floodRisk} flood</span>
             {graphStats && (
-              <span>📊 Graph: {graphStats.nodes} nodes | {graphStats.edges} edges | {graphStats.highRiskEdges} high-risk</span>
+              <span>📊 Graph: {graphStats.nodes} nodes | {graphStats.edges} edges</span>
+            )}
+            {routingTime && (
+              <span className="text-green-400">⚡ {routingTime}ms</span>
             )}
           </div>
 
@@ -1556,7 +1542,7 @@ function CitizenDashboard() {
           {/* Path Details */}
           {pathDetails && (
             <div className="mb-4 bg-slate-800 rounded-lg p-4">
-              <h3 className="font-bold mb-2 text-cyan-400">📊 Path Analysis (A* Algorithm)</h3>
+              <h3 className="font-bold mb-2 text-cyan-400">📊 Path Analysis {routingTime && `(${routingTime}ms)`}</h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                 <div>
                   <span className="text-gray-400">Distance:</span>
