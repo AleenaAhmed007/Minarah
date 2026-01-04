@@ -20,7 +20,7 @@ class UserService:
         return {"message": "User created"}
 
     def login(self, email: str, password: str):
-        # 👉 Hard-coded admin (since role is removed)
+        # Hard-coded admin 
         if email == "admin@minarah.pk" and password == "Admin123":
             return {
                 "name": "Admin",

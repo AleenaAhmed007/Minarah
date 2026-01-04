@@ -457,7 +457,7 @@ const RescueMissions = () => {
               </h1>
               <p className="text-slate-400">
                 Manage your assigned and completed rescue operations
-                <span className="text-orange-400 ml-2">• Sorted by Priority</span>
+                
               </p>
             </div>
           </div>
