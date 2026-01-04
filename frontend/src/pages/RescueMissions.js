@@ -109,9 +109,37 @@ const RescueMissions = () => {
     }
   };
 
-  // Filter missions based on search and priority
+  // ========== PRIORITY SORTING FUNCTION ==========
+  // Critical > High > Medium > Low
+  const getPriorityValue = (priority) => {
+    switch (priority?.toLowerCase()) {
+      case "critical":
+        return 1;
+      case "high":
+        return 2;
+      case "medium":
+        return 3;
+      case "low":
+        return 4;
+      default:
+        return 5; // Unknown priorities go last
+    }
+  };
+
+  const sortMissionsByPriority = (missions) => {
+    return [...missions].sort((a, b) => {
+      // First sort by priority
+      const priorityDiff = getPriorityValue(a.priority) - getPriorityValue(b.priority);
+      if (priorityDiff !== 0) return priorityDiff;
+      
+      // If same priority, sort by timestamp (newest first)
+      return new Date(b.timestamp || b.createdAt || 0) - new Date(a.timestamp || a.createdAt || 0);
+    });
+  };
+
+  // Filter missions based on search and priority, then sort
   const filterMissions = (missions) => {
-    return missions.filter((mission) => {
+    const filtered = missions.filter((mission) => {
       const matchesSearch =
         mission.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         mission.location?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -123,6 +151,9 @@ const RescueMissions = () => {
 
       return matchesSearch && matchesPriority;
     });
+
+    // Sort filtered missions by priority
+    return sortMissionsByPriority(filtered);
   };
 
   const getPriorityColor = (priority) => {
@@ -426,6 +457,7 @@ const RescueMissions = () => {
               </h1>
               <p className="text-slate-400">
                 Manage your assigned and completed rescue operations
+                <span className="text-orange-400 ml-2">• Sorted by Priority</span>
               </p>
             </div>
           </div>
@@ -595,6 +627,20 @@ const RescueMissions = () => {
                 </select>
               </div>
             </div>
+          </div>
+
+          {/* Filter Info */}
+          <div className="mt-3 pt-3 border-t border-slate-700">
+            <p className="text-sm text-slate-400">
+              Showing{" "}
+              <span className="text-cyan-400 font-semibold">
+                {filterMissions(activeTab === "assigned" ? assignedMissions : completedMissions).length}
+              </span>{" "}
+              mission(s)
+              <span className="text-orange-400 ml-2 font-medium">
+                
+              </span>
+            </p>
           </div>
         </div>
 

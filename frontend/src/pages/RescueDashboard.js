@@ -332,6 +332,37 @@ function RescueDashboard() {
     }
   };
 
+  // ========== PRIORITY SORTING FUNCTION ==========
+  // Critical > High > Medium > Low
+  const getPriorityValue = (priority) => {
+    switch (priority?.toLowerCase()) {
+      case "critical":
+        return 1;
+      case "high":
+        return 2;
+      case "medium":
+        return 3;
+      case "low":
+        return 4;
+      default:
+        return 5; // Unknown priorities go last
+    }
+  };
+
+  const sortSOSByPriority = (sosList) => {
+    return [...sosList].sort((a, b) => {
+      // First sort by priority
+      const priorityDiff = getPriorityValue(a.priority) - getPriorityValue(b.priority);
+      if (priorityDiff !== 0) return priorityDiff;
+      
+      // If same priority, sort by created date (newest first)
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+  };
+
+  // Get sorted SOS list
+  const sortedSOSList = sortSOSByPriority(assignedSOSList);
+
   const statusOptions = [
     { value: "Available", label: "Available", color: "text-green-400" },
     { value: "Busy", label: "On Mission", color: "text-orange-400" },
@@ -597,7 +628,7 @@ function RescueDashboard() {
           </div>
         </motion.div>
 
-        {/* RECENT ASSIGNED SOS ALERTS */}
+        {/* RECENT ASSIGNED SOS ALERTS - SORTED BY PRIORITY */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -616,6 +647,7 @@ function RescueDashboard() {
                 <p className="text-slate-400 text-sm">
                   {assignedSOSList.length} active{" "}
                   {assignedSOSList.length === 1 ? "alert" : "alerts"}
+                  
                 </p>
               </div>
             </div>
@@ -644,7 +676,8 @@ function RescueDashboard() {
             </div>
           ) : (
             <div className="space-y-4">
-              {assignedSOSList.slice(0, 3).map((sos, index) => (
+              {/* Display sorted SOS list (top 3) */}
+              {sortedSOSList.slice(0, 3).map((sos, index) => (
                 <motion.div
                   key={sos._id}
                   initial={{ opacity: 0, x: -20 }}
