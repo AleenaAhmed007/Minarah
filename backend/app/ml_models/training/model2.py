@@ -304,39 +304,6 @@ if low_confidence_mask.sum() > 0:
     print("Consider reviewing these cases or gathering more data.")
 
 # -----------------------------
-# SAVE MODEL + ENCODER + METADATA
-# -----------------------------
-# print("\n" + "="*60)
-# print("SAVING MODEL ARTIFACTS")
-# print("="*60)
-
-# joblib.dump(model, "pre_flood_severity_model.pkl")
-# joblib.dump(le, "pre_flood_severity_label_encoder.pkl")
-
-# # Save comprehensive metadata
-# metadata = {
-#     'features': pre_flood_features,
-#     'severity_mapping': severity_mapping,
-#     'model_type': 'RandomForestClassifier',
-#     'kappa_score': kappa,
-#     'feature_importance': importance_df.to_dict(),
-#     'class_distribution': df['Severity'].value_counts().to_dict(),
-#     'formula_explanation': {
-#         'rain_weight': 0.50,
-#         'veg_weight': 0.30,
-#         'temp_weight': 0.15,
-#         'ice_weight': 0.05,
-#         'severe_threshold': 0.6,
-#         'moderate_threshold': 0.3
-#     }
-# }
-# joblib.dump(metadata, "severity_model_metadata.pkl")
-
-# print("✓ Model saved as: pre_flood_severity_model.pkl")
-# print("✓ Label Encoder saved as: pre_flood_severity_label_encoder.pkl")
-# print("✓ Metadata saved as: severity_model_metadata.pkl")
-
-# -----------------------------
 # COMPREHENSIVE SAMPLE TESTS
 # -----------------------------
 print("\n" + "="*60)
