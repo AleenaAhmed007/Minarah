@@ -276,3 +276,160 @@ minarah/
 ├── data/
 ├── tests/
 └── README.md
+```
+
+---
+
+# Getting Started
+
+## Prerequisites
+
+- Python 3.10+
+- Node.js
+- FastAPI
+- Uvicorn
+- OpenSSL
+
+## Clone Repository
+
+```bash
+git clone https://github.com/AleenaAhmed007/Minarah.git
+cd Minarah
+```
+
+## Install Backend Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+## Run Backend
+
+```bash
+uvicorn app.main:app --host localhost --port 8000 --reload
+```
+
+## Run Frontend
+```bash
+npm install
+npm run dev
+```
+
+---
+
+# API Reference
+
+- POST /predict-flood
+Returns flood prediction and severity level.
+
+- POST /safe-route
+Returns safest evacuation path.
+
+- POST /nearest-hospital
+Returns nearest hospitals and shelters.
+
+- POST /send-sos
+Creates emergency SOS alert for rescue teams.
+
+---
+
+# Model Validation
+
+The ML model is validated using:
+
+- K-Fold Cross Validation
+
+- Recall Optimization
+
+- ROC-AUC Analysis
+
+- Confusion Matrix
+
+- Feature Importance Graphs
+
+- Precision-Recall Curves
+
+Flood risk heatmaps improve system transparency and support better decision-making.
+
+---
+
+# Security
+The platform ensures:
+
+- HTTPS Communication
+
+- SSL Certificate Protection
+
+- Secure API Endpoints
+
+- Authentication and Access Control
+
+- Input Validation
+
+- Safe Emergency Communication
+
+These security measures protect sensitive user data and emergency operations.
+
+---
+
+# Future Roadmap
+
+- National deployment across Pakistan
+
+- Mobile application launch
+
+- Government disaster integration
+
+- Satellite-based real-time monitoring
+
+- Advanced deep learning forecasting
+
+- Smart city disaster response integration
+
+Our goal is to scale MINARAH into a nationwide disaster-management solution.
+
+---
+
+# Team
+
+- Aleena Ahmed	
+- Minahil Samreen
+- Seerat Fatima
+
+---
+
+# Supervisors
+
+Special thanks to our respected mentors:
+
+- Miss Fatima — Data Structures & Algorithms
+
+- Miss Irum — Software Engineering
+
+- Dr. Faiza Iqbal — Computer Networks
+
+- Dr. Shazia Arshad — Data Science
+
+Their guidance played a major role in the successful development of MINARAH.
+
+---
+
+# License
+This project is licensed under the MIT License.
+
+---
+
+# Final Note
+MINARAH is more than a final year project — it is a real-world solution for saving lives.
+
+By combining AI, Machine Learning, Networking, and Smart Routing, the system enables:
+
+- Early Flood Prediction
+- Real-Time Emergency Alerts
+- Safe Evacuation Routes
+- Secure SOS Communication
+- Faster Rescue Response
+
+Technology can save lives — and MINARAH is built for that purpose.
+---
+
